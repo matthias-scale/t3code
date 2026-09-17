@@ -75,8 +75,18 @@ const makeThread = (source: "codex" | "claudeAgent"): AgentSessionScanner.AgentS
   createdAt: "2026-08-24T10:00:00.000Z",
   updatedAt: "2026-08-24T10:01:00.000Z",
   messages: [
-    { role: "user", text: "Fix the bug", createdAt: "2026-08-24T10:00:00.000Z" },
-    { role: "assistant", text: "Fixed", createdAt: "2026-08-24T10:01:00.000Z" },
+    {
+      importIndex: 0,
+      role: "user",
+      text: "Fix the bug",
+      createdAt: "2026-08-24T10:00:00.000Z",
+    },
+    {
+      importIndex: 1,
+      role: "assistant",
+      text: "Fixed",
+      createdAt: "2026-08-24T10:01:00.000Z",
+    },
   ],
 });
 
@@ -318,6 +328,523 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
+    it.effect("repairs legacy context titles on already imported Codex threads", () =>
+      Effect.gen(function* () {
+        const thread = makeThread("codex");
+        const source = makeThreadOutcome(thread).source;
+        const threadId = ThreadId.make(
+          `import:${source.providerInstanceId}:${source.providerSessionId}`,
+        );
+        const commands: Array<OrchestrationCommand> = [];
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () =>
+            Stream.succeed({
+              _tag: "AlreadyImported",
+              source,
+              canonicalTitle: "Prototype MetaApi trade replication",
+            }),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an existing binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => Effect.die("must not rewrite completed history"),
+          getBinding: () => Effect.die("must not read a completed binding"),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+
+        const result = yield* runImport({
+          scanner,
+          engine,
+          directory,
+          snapshots: makeSnapshotsLayer({
+            project: makeProject(),
+            getThread: (id) =>
+              id === threadId
+                ? Option.some({
+                    ...makeProjectedThread({ source: "codex", imported: true }),
+                    title: "<recommended_plugins>",
+                  })
+                : Option.none(),
+          }),
+        });
+
+        expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(commands).toMatchObject([
+          {
+            type: "thread.title.import.sync",
+            threadId,
+            title: "Prototype MetaApi trade replication",
+            expectedTitle: "<recommended_plugins>",
+            expectedVersion: null,
+          },
+        ]);
+
+        commands.length = 0;
+        expect(
+          yield* runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                Option.some({
+                  ...makeProjectedThread({ source: "codex", imported: true }),
+                  title: "# AGENTS.md instructions for /tmp/project",
+                }),
+            }),
+          }),
+        ).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(commands).toMatchObject([
+          {
+            type: "thread.title.import.sync",
+            expectedTitle: "# AGENTS.md instructions for /tmp/project",
+            title: "Prototype MetaApi trade replication",
+          },
+        ]);
+
+        commands.length = 0;
+        expect(
+          yield* runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                Option.some({
+                  ...makeProjectedThread({ source: "codex", imported: true }),
+                  title: "My custom thread title",
+                  titleState: {
+                    source: "manual",
+                    version: CommandId.make("manual-title"),
+                    needsRefinement: false,
+                  },
+                }),
+            }),
+          }),
+        ).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(commands).toEqual([]);
+      }),
+    );
+
+    it.effect("appends changed provider history and syncs its title", () =>
+      Effect.gen(function* () {
+        const providerThread = {
+          ...makeThread("claudeAgent"),
+          title: "Renamed in Claude",
+          messages: [
+            ...makeThread("claudeAgent").messages,
+            {
+              importIndex: 2,
+              role: "user" as const,
+              text: "One more change",
+              createdAt: "2026-08-24T10:02:00.000Z",
+            },
+          ],
+        };
+        const threadId = ThreadId.make(
+          `import:${providerThread.providerInstanceId}:${providerThread.providerSessionId}`,
+        );
+        const commands: Array<OrchestrationCommand> = [];
+        let recorded = 0;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.succeed(makeThreadOutcome(providerThread)),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an existing binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => Effect.sync(() => void (recorded += 1)),
+          getBinding: () =>
+            Effect.succeed(
+              Option.some({
+                threadId,
+                provider: ProviderDriverKind.make("claudeAgent"),
+                providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                status: "stopped" as const,
+              }),
+            ),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+        const projected = {
+          ...makeProjectedThread({ source: "claudeAgent", imported: true }),
+          title: "Original Claude title",
+        };
+
+        const result = yield* runImport({
+          scanner,
+          engine,
+          directory,
+          snapshots: makeSnapshotsLayer({
+            project: makeProject(),
+            getThread: () => Option.some(projected),
+          }),
+        });
+
+        expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(recorded).toBe(1);
+        expect(commands).toMatchObject([
+          {
+            type: "thread.history.append",
+            threadId,
+            messages: [
+              {
+                messageId: `${threadId}:000001`,
+                role: "assistant",
+                text: "Fixed",
+              },
+              {
+                messageId: `${threadId}:000002`,
+                role: "user",
+                text: "One more change",
+              },
+            ],
+          },
+          {
+            type: "thread.title.import.sync",
+            threadId,
+            expectedTitle: "Original Claude title",
+            title: "Renamed in Claude",
+          },
+        ]);
+      }),
+    );
+
+    it.effect("does not append transcript messages twice on a rerun", () =>
+      Effect.gen(function* () {
+        const baseThread = makeThread("codex");
+        const providerThread = {
+          ...baseThread,
+          messages: [
+            baseThread.messages[0]!,
+            { ...baseThread.messages[1]!, importIndex: 2 },
+            {
+              importIndex: 4,
+              role: "user" as const,
+              text: "Verify the fix",
+              createdAt: "2026-08-24T10:02:00.000Z",
+            },
+          ],
+        };
+        const threadId = ThreadId.make(
+          `import:${providerThread.providerInstanceId}:${providerThread.providerSessionId}`,
+        );
+        let projected = makeProjectedThread({ source: "codex", imported: true });
+        const commands: Array<OrchestrationCommand> = [];
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.succeed(makeThreadOutcome(providerThread)),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              if (command.type === "thread.history.append") {
+                projected = {
+                  ...projected,
+                  messages: [
+                    ...projected.messages,
+                    ...command.messages.map((message) => ({
+                      id: message.messageId,
+                      role: message.role,
+                      text: message.text,
+                      turnId: null,
+                      streaming: false,
+                      createdAt: message.createdAt,
+                      updatedAt: message.createdAt,
+                    })),
+                  ],
+                };
+              }
+              return { sequence: commands.length };
+            }),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an existing binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => Effect.void,
+          getBinding: () =>
+            Effect.succeed(
+              Option.some({
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                status: "stopped" as const,
+              }),
+            ),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+        const snapshots = makeSnapshotsLayer({
+          project: makeProject(),
+          getThread: () => Option.some(projected),
+        });
+
+        expect(yield* runImport({ scanner, engine, directory, snapshots })).toEqual({
+          importedCount: 1,
+          skippedCount: 0,
+        });
+        expect(yield* runImport({ scanner, engine, directory, snapshots })).toEqual({
+          importedCount: 1,
+          skippedCount: 0,
+        });
+
+        expect(commands).toHaveLength(1);
+        expect(commands[0]).toMatchObject({
+          type: "thread.history.append",
+          messages: [
+            { messageId: `${threadId}:000002`, text: "Fixed" },
+            { messageId: `${threadId}:000004`, text: "Verify the fix" },
+          ],
+        });
+        expect(projected.messages.map((message) => message.text)).toEqual([
+          "Fix the bug",
+          "Fixed",
+          "Verify the fix",
+        ]);
+      }),
+    );
+
+    it.effect("does not touch imported threads with native activity", () =>
+      Effect.gen(function* () {
+        const providerThread = {
+          ...makeThread("codex"),
+          title: "Renamed in Codex",
+        };
+        const threadId = ThreadId.make(
+          `import:${providerThread.providerInstanceId}:${providerThread.providerSessionId}`,
+        );
+        const commands: Array<OrchestrationCommand> = [];
+        let recorded = 0;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.succeed(makeThreadOutcome(providerThread)),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an existing binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => Effect.sync(() => void (recorded += 1)),
+          getBinding: () =>
+            Effect.succeed(
+              Option.some({
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                status: "stopped" as const,
+              }),
+            ),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+
+        const result = yield* runImport({
+          scanner,
+          engine,
+          directory,
+          snapshots: makeSnapshotsLayer({
+            project: makeProject(),
+            getThread: () =>
+              Option.some(
+                makeProjectedThread({ source: "codex", imported: true, includeFollowup: true }),
+              ),
+          }),
+        });
+
+        expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(commands).toEqual([]);
+        expect(recorded).toBe(1);
+      }),
+    );
+
+    it.effect(
+      "repairs a legacy title from imported history when the Codex index has no title",
+      () =>
+        Effect.gen(function* () {
+          const thread = makeThread("codex");
+          const source = makeThreadOutcome(thread).source;
+          const threadId = ThreadId.make(
+            `import:${source.providerInstanceId}:${source.providerSessionId}`,
+          );
+          const commands: Array<OrchestrationCommand> = [];
+          const scanner = AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            recentThreads: () =>
+              Stream.succeed({ _tag: "AlreadyImported", source, canonicalTitle: null }),
+          });
+          const engine = OrchestrationEngine.OrchestrationEngineService.of({
+            dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+            readEvents: () => Stream.empty,
+            readThreadEvents: () => Stream.empty,
+            getThreadReplayStats: () => Effect.die("unused"),
+            streamDomainEvents: Stream.empty,
+            subscribeDomainEvents: Effect.succeed(Stream.empty),
+            latestSequence: Effect.succeed(0),
+          });
+          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+            upsert: () => Effect.die("unused"),
+            getProvider: () => Effect.die("unused"),
+            recordImportedTranscript: () => Effect.die("must not rewrite completed history"),
+            getBinding: () => Effect.die("unused"),
+            listThreadIds: () => Effect.die("unused"),
+            listBindings: () => Effect.die("unused"),
+          });
+          const projected = makeProjectedThread({ source: "codex", imported: true });
+
+          const result = yield* runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                Option.some({
+                  ...projected,
+                  title: "<user_instructions>",
+                  messages: [
+                    {
+                      ...projected.messages[0]!,
+                      text: "<user_instructions>\nInternal setup instructions",
+                    },
+                    {
+                      ...projected.messages[0]!,
+                      id: MessageId.make(`${threadId}:000001`),
+                      text: "Recovered from imported history",
+                    },
+                  ],
+                }),
+            }),
+          });
+
+          expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+          expect(commands).toMatchObject([
+            {
+              type: "thread.title.import.sync",
+              threadId,
+              expectedTitle: "<user_instructions>",
+              title: "Recovered from imported history",
+            },
+          ]);
+        }),
+    );
+
+    it.effect("retries a changed import when its title sync fails", () =>
+      Effect.gen(function* () {
+        const thread = makeThread("codex");
+        const outcome = makeThreadOutcome(thread);
+        const threadId = ThreadId.make(
+          `import:${thread.providerInstanceId}:${thread.providerSessionId}`,
+        );
+        let recorded = 0;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.succeed(outcome),
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) =>
+            command.type === "thread.title.import.sync"
+              ? Effect.fail(
+                  new OrchestrationCommandInvariantError({
+                    commandType: command.type,
+                    detail: "Temporary title repair failure.",
+                  }),
+                )
+              : Effect.die("must not dispatch another command"),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace the existing binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => Effect.sync(() => void (recorded += 1)),
+          getBinding: () =>
+            Effect.succeed(
+              Option.some({
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                status: "stopped" as const,
+                resumeCursor: { threadId: thread.providerSessionId },
+                runtimeMode: "full-access" as const,
+                runtimePayload: { cwd: WORKSPACE_ROOT },
+              }),
+            ),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+
+        const result = yield* runImport({
+          scanner,
+          engine,
+          directory,
+          snapshots: makeSnapshotsLayer({
+            project: makeProject(),
+            getThread: () => {
+              const projected = makeProjectedThread({ source: "codex", imported: true });
+              return Option.some({
+                ...projected,
+                title: "<recommended_plugins>",
+                messages: [
+                  ...projected.messages,
+                  {
+                    ...projected.messages[0]!,
+                    id: MessageId.make(`${threadId}:000001`),
+                    role: "assistant" as const,
+                    text: "Fixed",
+                    createdAt: "2026-08-24T10:01:00.000Z",
+                    updatedAt: "2026-08-24T10:01:00.000Z",
+                  },
+                ],
+              });
+            },
+          }),
+        });
+
+        expect(result).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(recorded).toBe(0);
+      }),
+    );
+
     it.effect("counts scanner skips without writing a thread or binding", () =>
       Effect.gen(function* () {
         const scanner = AgentSessionScanner.AgentSessionScanner.of({
@@ -545,6 +1072,7 @@ const integrationThread = {
   ...makeThread("codex"),
   updatedAt: "2026-08-24T10:00:00.000Z",
   messages: Array.from({ length: 12 }, (_, index) => ({
+    importIndex: index,
     role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
     text: `Message ${index}`,
     createdAt: "2026-08-24T10:00:00.000Z",

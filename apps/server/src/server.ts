@@ -95,6 +95,8 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import * as AgentSessionSync from "./project/AgentSessionSync.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -428,6 +430,17 @@ const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
   Layer.provide(T3ProjectFileLoader.layer),
 );
 
+const AgentSessionSyncLayerLive = AgentSessionSync.layer.pipe(
+  Layer.provide(AgentSessionScanner.layer),
+);
+
+const AgentSessionSyncStartLayerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const sync = yield* AgentSessionSync.AgentSessionSync;
+    yield* sync.start();
+  }),
+).pipe(Layer.provide(AgentSessionSyncLayerLive));
+
 const ServerEnvironmentLayerLive = ServerEnvironment.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
@@ -482,6 +495,7 @@ const AntigravityInstallationRefreshLive = Layer.effectDiscard(
 );
 
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+  Layer.provideMerge(AgentSessionSyncStartLayerLive),
   Layer.provideMerge(AntigravityInstallationRefreshLive),
   Layer.provideMerge(ProviderAuthServiceLive),
   // Core Services

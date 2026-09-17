@@ -106,6 +106,17 @@ function openRequests(thread: Pick<OrchestrationThread, "activities">) {
   return requests;
 }
 
+function hasNativeImportedThreadActivity(
+  thread: Pick<OrchestrationThread, "messages" | "latestTurn" | "session" | "proposedPlans">,
+): boolean {
+  return (
+    thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id)) ||
+    thread.latestTurn !== null ||
+    thread.session !== null ||
+    thread.proposedPlans.length > 0
+  );
+}
+
 /** Apply the shared shell-level rule to the detailed command read model. */
 function hasQueuedTurnStartForThread(
   thread: Pick<OrchestrationThread, "messages" | "latestTurn" | "session">,
@@ -2051,6 +2062,97 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       });
       return events;
+    }
+
+    case "thread.history.append": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (hasNativeImportedThreadActivity(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' has native activity and cannot receive imported history.`,
+        });
+      }
+
+      const existingMessageIds = new Set(thread.messages.map((message) => message.id));
+      const appendedMessageIds = new Set<MessageId>();
+      const events: Array<PlannedOrchestrationEvent> = [];
+      for (const message of command.messages) {
+        if (
+          !isImportedAgentSessionMessageId(message.messageId) ||
+          existingMessageIds.has(message.messageId) ||
+          appendedMessageIds.has(message.messageId)
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Message id '${message.messageId}' is not a new imported-session message id.`,
+          });
+        }
+        appendedMessageIds.add(message.messageId);
+        events.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: message.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        });
+      }
+      return events;
+    }
+
+    case "thread.title.import.sync": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (
+        hasNativeImportedThreadActivity(thread) ||
+        thread.titleState?.source === "manual" ||
+        thread.title !== command.expectedTitle ||
+        (thread.titleState?.version ?? null) !== command.expectedVersion
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' changed before its imported title could be synced.`,
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: yield* nowIso,
+          commandId: command.commandId,
+          metadata: { historyImport: true },
+        })),
+        type: "thread.meta-updated",
+        payload: {
+          threadId: command.threadId,
+          title: command.title,
+          titleState: {
+            source: "generated",
+            version: command.commandId,
+            needsRefinement: false,
+          },
+          updatedAt: thread.updatedAt,
+        },
+      };
     }
 
     case "thread.proposed-plan.upsert": {
