@@ -7,7 +7,7 @@ const reference = {
   environmentId: EnvironmentId.make("reference"),
   settings: {
     ...DEFAULT_SERVER_SETTINGS,
-    sidebarAutoSettleAfterDays: 7,
+    sidebarAutoSettleAfterHours: 7,
     sidebarAutoSettleOnMerge: true,
     newWorktreesStartFromOrigin: false,
     continueThreadsAfterServerUpdate: false,
@@ -34,7 +34,7 @@ describe("auto-settle settings sync", () => {
 
     expect(plan.mismatches).toEqual([]);
     expect(plan.patch).toEqual({
-      sidebarAutoSettleAfterDays: 7,
+      sidebarAutoSettleAfterHours: 7,
       sidebarAutoSettleOnMerge: true,
     });
   });
@@ -45,7 +45,7 @@ describe("auto-settle settings sync", () => {
       label: "Remote",
       settings: {
         ...reference.settings,
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
         newWorktreesStartFromOrigin: true,
         continueThreadsAfterServerUpdate: true,
@@ -60,7 +60,7 @@ describe("auto-settle settings sync", () => {
     const updated = { ...target.settings, ...plan.patch };
 
     expect(plan.mismatches).toEqual([target]);
-    expect(updated.sidebarAutoSettleAfterDays).toBe(7);
+    expect(updated.sidebarAutoSettleAfterHours).toBe(7);
     expect(updated.sidebarAutoSettleOnMerge).toBe(true);
     expect(updated.newWorktreesStartFromOrigin).toBe(true);
     expect(updated.continueThreadsAfterServerUpdate).toBe(true);

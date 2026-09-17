@@ -29,7 +29,6 @@ import {
   MAX_INTERFACE_FONT_SIZE,
   MAX_PANEL_ANIMATION_DURATION_MS,
   MAX_PROMPT_FONT_SIZE,
-  MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   MAX_TERMINAL_FONT_SIZE,
   MIN_CODE_FONT_SIZE,
   MIN_APPEARANCE_CONTRAST,
@@ -37,7 +36,6 @@ import {
   MIN_INTERFACE_FONT_SIZE,
   MIN_PANEL_ANIMATION_DURATION_MS,
   MIN_PROMPT_FONT_SIZE,
-  MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
   type ResponseStreamingMode,
   MIN_TERMINAL_FONT_SIZE,
   type QuitConfirmationMode,
@@ -554,8 +552,8 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
         ? ["Project Grouping"]
         : []),
-      ...(settings.sidebarAutoSettleAfterDays !==
-      DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
+      ...(settings.sidebarAutoSettleAfterHours !==
+      DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterHours
         ? ["Auto-settle inactive threads"]
         : []),
       ...(settings.sidebarAutoSettleOnMerge !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge
@@ -669,7 +667,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.responseStreamingMode,
       settings.enableProviderUpdateChecks,
       settings.continueThreadsAfterServerUpdate,
-      settings.sidebarAutoSettleAfterDays,
+      settings.sidebarAutoSettleAfterHours,
       settings.sidebarAutoSettleOnMerge,
       settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
@@ -768,7 +766,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
       sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
-      sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
+      sidebarAutoSettleAfterHours: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterHours,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
@@ -1958,47 +1956,63 @@ function FontFamilySettingsRow({
   );
 }
 
-const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ?? 3;
+const AUTO_SETTLE_DURATION_OPTIONS = [
+  { value: 4, label: "4 hours" },
+  { value: 12, label: "12 hours" },
+  { value: 24, label: "1 day" },
+  { value: 72, label: "3 days" },
+  { value: 168, label: "7 days" },
+] as const;
 
-function AutoSettleDaysInput({
+function formatAutoSettleDuration(hours: number): string {
+  return hours % 24 === 0
+    ? `${hours / 24} ${hours === 24 ? "day" : "days"}`
+    : `${hours} ${hours === 1 ? "hour" : "hours"}`;
+}
+
+function AutoSettleDurationSelect({
   value,
   onCommit,
 }: {
-  value: number;
-  onCommit: (days: number) => void;
+  value: number | null;
+  onCommit: (hours: number | null) => void;
 }) {
-  // Local draft so the field can be emptied mid-edit; the setting only moves
-  // on valid input and snaps back to the persisted value on blur.
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => {
-    setDraft(String(value));
-  }, [value]);
-
   return (
-    <Input
-      size="sm"
-      type="number"
-      min={MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS}
-      max={MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS}
-      className="w-full sm:w-24"
-      value={draft}
-      onChange={(event) => {
-        setDraft(event.target.value);
-        // Number(), not parseInt: "3.5" must be rejected (not truncated to a
-        // committed 3 while the field shows 3.5) — commit only when the
-        // persisted value matches the displayed one.
-        const parsed = Number(event.target.value);
-        if (
-          Number.isInteger(parsed) &&
-          parsed >= MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS &&
-          parsed <= MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS
-        ) {
-          onCommit(parsed);
+    <Select
+      value={value === null ? "never" : String(value)}
+      onValueChange={(next) => {
+        if (next === "never") {
+          onCommit(null);
+          return;
         }
+        const hours = Number(next);
+        if (Number.isInteger(hours)) onCommit(hours);
       }}
-      onBlur={() => setDraft(String(value))}
-      aria-label="Days of inactivity before auto-settle"
-    />
+    >
+      <SelectTrigger
+        size="sm"
+        className="w-full sm:w-32"
+        aria-label="Inactivity before auto-settle"
+      >
+        <SelectValue>{value === null ? "Never" : formatAutoSettleDuration(value)}</SelectValue>
+      </SelectTrigger>
+      <SelectPopup align="end" alignItemWithTrigger={false}>
+        <SelectItem hideIndicator value="never">
+          Never
+        </SelectItem>
+        {value !== null &&
+        !AUTO_SETTLE_DURATION_OPTIONS.some((option) => option.value === value) ? (
+          <SelectItem hideIndicator value={String(value)}>
+            {formatAutoSettleDuration(value)}
+          </SelectItem>
+        ) : null}
+        {AUTO_SETTLE_DURATION_OPTIONS.map((option) => (
+          <SelectItem hideIndicator key={option.value} value={String(option.value)}>
+            {option.label}
+          </SelectItem>
+        ))}
+      </SelectPopup>
+    </Select>
   );
 }
 
@@ -2256,50 +2270,30 @@ export function GeneralSettingsPanel() {
 
             <SettingsRow
               serverScoped
-              settingKeys={["sidebarAutoSettleAfterDays"]}
+              settingKeys={["sidebarAutoSettleAfterHours"]}
               {...searchableSetting("auto-settle-inactive-threads")}
               description="Sidebar threads with no activity for this long settle automatically."
               resetAction={
-                settings.sidebarAutoSettleAfterDays !==
-                DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays ? (
+                settings.sidebarAutoSettleAfterHours !==
+                DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterHours ? (
                   <SettingResetButton
                     label="auto-settle"
                     onClick={() =>
                       updateSettings({
-                        sidebarAutoSettleAfterDays:
-                          DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
+                        sidebarAutoSettleAfterHours:
+                          DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterHours,
                       })
                     }
                   />
                 ) : null
               }
               control={
-                <ScopedSwitch
-                  settingKeys={["sidebarAutoSettleAfterDays"]}
-                  checked={settings.sidebarAutoSettleAfterDays !== null}
-                  onCheckedChange={(checked) =>
-                    updateSettings({
-                      sidebarAutoSettleAfterDays: checked ? AUTO_SETTLE_DEFAULT_DAYS : null,
-                    })
-                  }
-                  aria-label="Auto-settle inactive threads"
+                <AutoSettleDurationSelect
+                  value={settings.sidebarAutoSettleAfterHours}
+                  onCommit={(hours) => updateSettings({ sidebarAutoSettleAfterHours: hours })}
                 />
               }
             />
-            {settings.sidebarAutoSettleAfterDays !== null ? (
-              <SettingsRow
-                serverScoped
-                settingKeys={["sidebarAutoSettleAfterDays"]}
-                title={searchableSetting("days-before-auto-settle").title}
-                description="Any new activity un-settles a thread automatically."
-                control={
-                  <AutoSettleDaysInput
-                    value={settings.sidebarAutoSettleAfterDays}
-                    onCommit={(days) => updateSettings({ sidebarAutoSettleAfterDays: days })}
-                  />
-                }
-              />
-            ) : null}
           </>
         ) : null}
       </SettingsSection>

@@ -18,6 +18,7 @@ const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const encodeUnknownServerSettings = Schema.encodeUnknownSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
 describe("storage cleanup settings", () => {
@@ -626,30 +627,66 @@ describe("ClientSettings composer collapse", () => {
 });
 
 describe("ServerSettings thread settlement", () => {
-  it("defaults merge settlement on and inactivity settlement to three days", () => {
-    const settings = decodeServerSettings({});
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
-    expect(settings.sidebarAutoSettleOnMerge).toBe(true);
+  it("defaults to 12 hours and migrates the stored days setting", () => {
+    expect(decodeServerSettings({}).sidebarAutoSettleAfterHours).toBe(12);
+    expect(
+      decodeServerSettings({ sidebarAutoSettleAfterDays: 3 }).sidebarAutoSettleAfterHours,
+    ).toBe(72);
+    expect(
+      decodeServerSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterHours,
+    ).toBeNull();
+    expect(
+      decodeServerSettings({ sidebarAutoSettleAfterDays: 1.1 }).sidebarAutoSettleAfterHours,
+    ).toBeCloseTo(26.4);
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: {
+          project: { sidebarAutoSettleAfterDays: 7 },
+          disabled: { sidebarAutoSettleAfterDays: null },
+        },
+      }).projectSettingsOverrides,
+    ).toMatchObject({
+      project: { sidebarAutoSettleAfterHours: 168 },
+      disabled: { sidebarAutoSettleAfterHours: null },
+    });
   });
 
   it("allows both automatic rules to be disabled", () => {
     expect(
       decodeServerSettings({
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
       }),
-    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
+    ).toMatchObject({ sidebarAutoSettleAfterHours: null, sidebarAutoSettleOnMerge: false });
     expect(
       decodeServerSettingsPatch({
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
       }),
-    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
+    ).toMatchObject({ sidebarAutoSettleAfterHours: null, sidebarAutoSettleOnMerge: false });
   });
 
-  it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
-    expect(() => decodeServerSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
-    expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+  it("encodes sparse and migrated settings without requiring unrelated keys", () => {
+    expect(encodeUnknownServerSettings({ sidebarAutoSettleAfterHours: 24 })).toEqual({
+      sidebarAutoSettleAfterHours: 24,
+    });
+
+    const encoded = encodeServerSettings(
+      decodeServerSettings({
+        sidebarAutoSettleAfterDays: 3,
+        enableAgentBrowserAccess: false,
+      }),
+    );
+    expect(encoded).toMatchObject({
+      sidebarAutoSettleAfterHours: 72,
+      enableAgentBrowserAccess: false,
+    });
+    expect(encoded).not.toHaveProperty("sidebarAutoSettleAfterDays");
+  });
+
+  it.each([-1, 0, 2161])("rejects an auto-settle threshold outside 1..2160 hours: %s", (value) => {
+    expect(() => decodeServerSettings({ sidebarAutoSettleAfterHours: value })).toThrow();
+    expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterHours: value })).toThrow();
   });
 });
 

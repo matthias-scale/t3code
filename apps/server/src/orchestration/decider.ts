@@ -20,7 +20,6 @@ import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeysEqual,
 } from "@t3tools/shared/threadPullRequests";
-import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -2030,26 +2029,6 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      const settledAt = command.messages.reduce(
-        (latest, message) =>
-          compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
-        firstMessage.createdAt,
-      );
-      events.push({
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: settledAt,
-          commandId: command.commandId,
-          metadata: { historyImport: true },
-        })),
-        type: "thread.settled",
-        payload: {
-          threadId: command.threadId,
-          settledAt,
-          updatedAt: settledAt,
-        },
-      });
       return events;
     }
 
