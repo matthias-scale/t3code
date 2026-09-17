@@ -352,6 +352,38 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     ).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("migrates stored auto-settle days to hours before decoding settings", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const projectId = ProjectId.make("legacy-project");
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"sidebarAutoSettleAfterDays":3,"projectSettingsOverrides":{"legacy-project":{"sidebarAutoSettleAfterDays":2}}}',
+      );
+
+      const loaded = yield* serverSettings.getSettings;
+      assert.strictEqual(loaded.sidebarAutoSettleAfterHours, 72);
+      assert.strictEqual(loaded.sidebarAutoSettleAfterDays, undefined);
+      assert.strictEqual(
+        loaded.projectSettingsOverrides[projectId]?.sidebarAutoSettleAfterHours,
+        48,
+      );
+      assert.strictEqual(
+        loaded.projectSettingsOverrides[projectId]?.sidebarAutoSettleAfterDays,
+        undefined,
+      );
+
+      yield* serverSettings.updateSettings({});
+      const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      const persisted = JSON.parse(raw) as Record<string, unknown>;
+      assert.strictEqual(persisted.sidebarAutoSettleAfterHours, 72);
+      assert.notProperty(persisted, "sidebarAutoSettleAfterDays");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves model when switching providers via textGenerationModelSelection", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

@@ -9,9 +9,9 @@
  * the user can push their current value out.
  */
 import {
-  legacySidebarAutoSettleAfterDays,
   type EnvironmentId,
   type ExecutionEnvironmentCapabilities,
+  type ProjectId,
   type ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -25,6 +25,7 @@ import type { EnvironmentConnectionPhase } from "../connection/presentation.ts";
 const SHARED_SERVER_SETTING_KEYS = [
   "continueThreadsAfterServerUpdate",
   "sidebarAutoSettleAfterHours",
+  "sidebarAutoSettleAfterDays",
   "sidebarAutoSettleOnMerge",
   "newWorktreesStartFromOrigin",
   "sourceControlWritingStyle",
@@ -40,40 +41,69 @@ type SharedSettingsCapabilities = Pick<
   "threadAutoSettlementHours" | "threadRestartContinuation"
 >;
 
-/** Encode hour-based settlement settings for the target server's patch contract. */
-export function adaptServerSettingsPatchForCapabilities(
+export function selectAutoSettleThreshold(
+  settings: Pick<ServerSettings, "sidebarAutoSettleAfterHours" | "sidebarAutoSettleAfterDays">,
+  capabilities?: Pick<ExecutionEnvironmentCapabilities, "threadAutoSettlementHours">,
+):
+  | { readonly key: "sidebarAutoSettleAfterHours"; readonly value: number | null }
+  | { readonly key: "sidebarAutoSettleAfterDays"; readonly value: number | null | undefined } {
+  return capabilities?.threadAutoSettlementHours === true
+    ? { key: "sidebarAutoSettleAfterHours", value: settings.sidebarAutoSettleAfterHours }
+    : { key: "sidebarAutoSettleAfterDays", value: settings.sidebarAutoSettleAfterDays };
+}
+
+/** Keep only the auto-settlement keys the target server advertises. */
+export function filterAutoSettleSettingsPatchForCapabilities(
   patch: ServerSettingsPatch,
   capabilities?: { readonly threadAutoSettlementHours?: boolean | undefined },
 ): ServerSettingsPatch {
-  if (capabilities?.threadAutoSettlementHours === true) return patch;
-
   const { sidebarAutoSettleAfterHours, projectSettingsOverrides, ...rest } = patch;
-  const adaptedProjectSettingsOverrides =
-    projectSettingsOverrides === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(projectSettingsOverrides).map(([projectId, entry]) => {
-            if (entry === null || entry.sidebarAutoSettleAfterHours === undefined) {
-              return [projectId, entry];
-            }
-            const { sidebarAutoSettleAfterHours: hours, ...current } = entry;
-            return [
-              projectId,
-              { ...current, sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours) },
-            ];
-          }),
-        );
+  const { sidebarAutoSettleAfterDays, ...settings } = rest;
+  const supportsHours = capabilities?.threadAutoSettlementHours === true;
+  type ProjectOverridePatch = NonNullable<
+    ServerSettingsPatch["projectSettingsOverrides"]
+  >[ProjectId];
+  const filteredProjectSettingsOverrides: Record<ProjectId, ProjectOverridePatch> = {};
+  for (const [projectId, entry] of Object.entries(projectSettingsOverrides ?? {})) {
+    const id = projectId as ProjectId;
+    if (entry === null) {
+      filteredProjectSettingsOverrides[id] = null;
+      continue;
+    }
+    const {
+      sidebarAutoSettleAfterHours: entryHours,
+      sidebarAutoSettleAfterDays: entryDays,
+      ...current
+    } = entry;
+    const filtered = supportsHours
+      ? {
+          ...current,
+          ...(entryHours === undefined ? {} : { sidebarAutoSettleAfterHours: entryHours }),
+        }
+      : {
+          ...current,
+          ...(entryDays === undefined ? {} : { sidebarAutoSettleAfterDays: entryDays }),
+        };
+    if (Object.keys(filtered).length > 0) {
+      filteredProjectSettingsOverrides[id] = filtered;
+    }
+  }
+  const hasProjectSettingsOverrides =
+    projectSettingsOverrides !== undefined &&
+    Object.keys(filteredProjectSettingsOverrides).length > 0;
 
   return {
-    ...rest,
-    ...(sidebarAutoSettleAfterHours === undefined
-      ? {}
-      : {
-          sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(sidebarAutoSettleAfterHours),
-        }),
-    ...(adaptedProjectSettingsOverrides === undefined
-      ? {}
-      : { projectSettingsOverrides: adaptedProjectSettingsOverrides }),
+    ...settings,
+    ...(supportsHours
+      ? sidebarAutoSettleAfterHours === undefined
+        ? {}
+        : { sidebarAutoSettleAfterHours }
+      : sidebarAutoSettleAfterDays === undefined
+        ? {}
+        : { sidebarAutoSettleAfterDays }),
+    ...(hasProjectSettingsOverrides
+      ? { projectSettingsOverrides: filteredProjectSettingsOverrides }
+      : {}),
   };
 }
 
@@ -134,7 +164,7 @@ export function filterSharedServerPatch(
   sourceSettings = settings,
   targetIsSource = false,
 ): ServerSettingsPatch {
-  return adaptServerSettingsPatchForCapabilities(
+  return filterAutoSettleSettingsPatchForCapabilities(
     filterSupportedSharedServerPatch(patch, capabilities, settings, sourceSettings, targetIsSource),
     capabilities,
   );
@@ -145,10 +175,13 @@ export function pickSharedServerSettings(
   settings: ServerSettings,
   capabilities?: SharedSettingsCapabilities,
 ): ServerSettingsPatch {
-  return filterSupportedSharedServerPatch(
-    Struct.pick(settings, SHARED_SERVER_SETTING_KEYS),
+  return filterAutoSettleSettingsPatchForCapabilities(
+    filterSupportedSharedServerPatch(
+      Struct.pick(settings, SHARED_SERVER_SETTING_KEYS),
+      capabilities,
+      settings,
+    ),
     capabilities,
-    settings,
   );
 }
 
@@ -207,17 +240,16 @@ export function findSharedSettingsMismatches(input: {
     ) {
       return [];
     }
-    const expected = filterSupportedSharedServerPatch(
+    const expected = filterSharedServerPatch(
       primarySettings,
       environment.capabilities,
       environment.settings,
       input.primarySettings ?? undefined,
     );
-    let actual = filterSupportedSharedServerPatch(
-      pickSharedServerSettings(environment.settings, environment.capabilities),
-      input.primaryCapabilities,
-      environment.settings,
-    );
+    const targetSettings = pickSharedServerSettings(environment.settings, environment.capabilities);
+    let actual = Object.fromEntries(
+      Object.keys(expected).map((key) => [key, targetSettings[key as keyof ServerSettingsPatch]]),
+    ) as ServerSettingsPatch;
     if (!expected.textGenerationModelSelection) {
       actual = Struct.omit(actual, ["textGenerationModelSelection"]);
     }

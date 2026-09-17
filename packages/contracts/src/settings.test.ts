@@ -24,24 +24,6 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeUnknownServerSettings = Schema.encodeUnknownSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
-const Legacy042SidebarAutoSettleAfterDays = Schema.Number.check(
-  Schema.isBetween({ minimum: 1, maximum: 90 }),
-);
-const Legacy042ProjectSettingsOverrides = Schema.Struct({
-  sidebarAutoSettleAfterDays: Schema.optionalKey(
-    Schema.NullOr(Legacy042SidebarAutoSettleAfterDays),
-  ),
-});
-const Legacy042ServerSettings = Schema.Struct({
-  sidebarAutoSettleAfterDays: Schema.NullOr(Legacy042SidebarAutoSettleAfterDays).pipe(
-    Schema.withDecodingDefault(Effect.succeed(3)),
-  ),
-  projectSettingsOverrides: Schema.Record(ProjectId, Legacy042ProjectSettingsOverrides).pipe(
-    Schema.withDecodingDefault(Effect.succeed({})),
-  ),
-});
-const decodeLegacy042ServerSettings = Schema.decodeUnknownSync(Legacy042ServerSettings);
-
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();
@@ -665,17 +647,20 @@ describe("ClientSettings composer collapse", () => {
 });
 
 describe("ServerSettings thread settlement", () => {
-  it("defaults to 12 hours and migrates the stored days setting", () => {
+  it("retains legacy days without converting them at the wire boundary", () => {
     expect(decodeServerSettings({}).sidebarAutoSettleAfterHours).toBe(12);
-    expect(
-      decodeServerSettings({ sidebarAutoSettleAfterDays: 3 }).sidebarAutoSettleAfterHours,
-    ).toBe(72);
-    expect(
-      decodeServerSettings({ sidebarAutoSettleAfterDays: null }).sidebarAutoSettleAfterHours,
-    ).toBeNull();
-    expect(
-      decodeServerSettings({ sidebarAutoSettleAfterDays: 1.1 }).sidebarAutoSettleAfterHours,
-    ).toBeCloseTo(26.4);
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: 3 })).toMatchObject({
+      sidebarAutoSettleAfterDays: 3,
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: null })).toMatchObject({
+      sidebarAutoSettleAfterDays: null,
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: 1.1 })).toMatchObject({
+      sidebarAutoSettleAfterDays: 1.1,
+      sidebarAutoSettleAfterHours: 12,
+    });
     expect(
       decodeServerSettings({
         projectSettingsOverrides: {
@@ -684,8 +669,8 @@ describe("ServerSettings thread settlement", () => {
         },
       }).projectSettingsOverrides,
     ).toMatchObject({
-      project: { sidebarAutoSettleAfterHours: 168 },
-      disabled: { sidebarAutoSettleAfterHours: null },
+      project: { sidebarAutoSettleAfterDays: 7 },
+      disabled: { sidebarAutoSettleAfterDays: null },
     });
   });
 
@@ -719,50 +704,9 @@ describe("ServerSettings thread settlement", () => {
     });
   });
 
-  it.each([
-    { hours: 12, days: 1 },
-    { hours: null, days: null },
-    { hours: 30, days: 2 },
-  ])("encodes $hours hours for a 0.0.42 client as $days days", ({ hours, days }) => {
-    const encoded = encodeServerSettings(
-      decodeServerSettings({
-        sidebarAutoSettleAfterHours: hours,
-        projectSettingsOverrides: {
-          project: { sidebarAutoSettleAfterHours: hours },
-        },
-      }),
-    );
-
-    expect(encoded).toMatchObject({
-      sidebarAutoSettleAfterHours: hours,
-      projectSettingsOverrides: {
-        project: { sidebarAutoSettleAfterHours: hours },
-      },
-    });
-    expect(decodeLegacy042ServerSettings(encoded)).toEqual({
-      sidebarAutoSettleAfterDays: days,
-      projectSettingsOverrides: {
-        project: { sidebarAutoSettleAfterDays: days },
-      },
-    });
-  });
-
-  it("encodes sparse and migrated settings without requiring unrelated keys", () => {
+  it("encodes current settings without creating the legacy days key", () => {
     expect(encodeUnknownServerSettings({ sidebarAutoSettleAfterHours: 24 })).toEqual({
       sidebarAutoSettleAfterHours: 24,
-      sidebarAutoSettleAfterDays: 1,
-    });
-
-    const encoded = encodeServerSettings(
-      decodeServerSettings({
-        sidebarAutoSettleAfterDays: 3,
-        enableAgentBrowserAccess: false,
-      }),
-    );
-    expect(encoded).toMatchObject({
-      sidebarAutoSettleAfterHours: 72,
-      sidebarAutoSettleAfterDays: 3,
-      enableAgentBrowserAccess: false,
     });
   });
 

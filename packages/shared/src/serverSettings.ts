@@ -259,49 +259,32 @@ function translateLegacyProjectOverridePatch(
   } as ServerSettingsPatch;
 }
 
-/** Normalize the legacy day-based patch contract before merging current settings. */
-function translateLegacyAutoSettlePatch(patch: ServerSettingsPatch): ServerSettingsPatch {
-  const { sidebarAutoSettleAfterDays, projectSettingsOverrides, ...rest } = patch;
-  const normalizedProjectSettingsOverrides =
-    projectSettingsOverrides === undefined
-      ? undefined
-      : Object.fromEntries(
-          Object.entries(projectSettingsOverrides).map(([projectId, entry]) => {
-            if (entry === null) return [projectId, entry];
-            const { sidebarAutoSettleAfterDays: afterDays, ...current } = entry;
-            return [
-              projectId,
-              current.sidebarAutoSettleAfterHours !== undefined || afterDays === undefined
-                ? current
-                : {
-                    ...current,
-                    sidebarAutoSettleAfterHours: afterDays === null ? null : afterDays * 24,
-                  },
-            ];
-          }),
-        );
-  return {
-    ...rest,
-    ...(rest.sidebarAutoSettleAfterHours !== undefined || sidebarAutoSettleAfterDays === undefined
-      ? {}
-      : {
-          sidebarAutoSettleAfterHours:
-            sidebarAutoSettleAfterDays === null ? null : sidebarAutoSettleAfterDays * 24,
-        }),
-    ...(normalizedProjectSettingsOverrides === undefined
-      ? {}
-      : { projectSettingsOverrides: normalizedProjectSettingsOverrides }),
-  };
-}
-
 export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
 ): ServerSettings {
-  const patch = translateLegacyProjectOverridePatch(
-    current,
-    translateLegacyAutoSettlePatch(rawPatch),
-  );
+  const {
+    sidebarAutoSettleAfterDays: _legacyAutoSettleDays,
+    projectSettingsOverrides: rawProjectSettingsOverrides,
+    ...currentPatch
+  } = rawPatch;
+  const currentProjectSettingsOverrides = new Map<string, ProjectSettingsOverrides | null>();
+  for (const [projectId, entry] of Object.entries(rawProjectSettingsOverrides ?? {})) {
+    if (entry === null) {
+      currentProjectSettingsOverrides.set(projectId, null);
+      continue;
+    }
+    const { sidebarAutoSettleAfterDays: _legacyDays, ...currentEntry } = entry;
+    if (Object.keys(entry).length === 0 || Object.keys(currentEntry).length > 0) {
+      currentProjectSettingsOverrides.set(projectId, currentEntry);
+    }
+  }
+  const patch = translateLegacyProjectOverridePatch(current, {
+    ...currentPatch,
+    ...(currentProjectSettingsOverrides.size > 0
+      ? { projectSettingsOverrides: Object.fromEntries(currentProjectSettingsOverrides) }
+      : {}),
+  } as ServerSettingsPatch);
   const selectionPatch = patch.textGenerationModelSelection;
   const {
     automaticGitFetchInterval,

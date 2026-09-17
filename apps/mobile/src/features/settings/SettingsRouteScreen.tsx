@@ -1,4 +1,5 @@
 import { AutoSettleHoursField } from "./components/AutoSettleHoursField";
+import { AutoSettleDaysField } from "./components/AutoSettleDaysField";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
@@ -44,7 +45,10 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironments } from "../../state/environments";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
-import { supportsSharedSettingsSync } from "@t3tools/client-runtime/state/shared-settings";
+import {
+  selectAutoSettleThreshold,
+  supportsSharedSettingsSync,
+} from "@t3tools/client-runtime/state/shared-settings";
 import { useThreadListV2Enabled } from "../threads/use-thread-list-v2-enabled";
 import {
   type AppUpdateCheckState,
@@ -616,6 +620,7 @@ function GeneralSettingsSection() {
 }
 
 const AUTO_SETTLE_DEFAULT_HOURS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterHours ?? 12;
+const AUTO_SETTLE_DEFAULT_DAYS = 3;
 
 /**
  * Mobile edits auto-settle defaults across connected, capable environments.
@@ -654,15 +659,28 @@ function AutoSettleSettingsRows() {
   };
 
   const { patch: autoSettlePatch, mismatches } = planAutoSettleSettingsSync(
-    { environmentId: reference.environmentId, settings: referenceSettings },
+    {
+      environmentId: reference.environmentId,
+      settings: referenceSettings,
+      capabilities: reference.serverConfig?.environment.capabilities,
+    },
     syncTargets.map((environment) => ({
       environmentId: environment.environmentId,
       label: environment.label,
       settings: environment.serverConfig?.settings ?? null,
+      capabilities: environment.serverConfig?.environment.capabilities,
     })),
   );
 
-  const afterHours = referenceSettings.sidebarAutoSettleAfterHours;
+  const selectedThreshold = selectAutoSettleThreshold(
+    referenceSettings,
+    reference.serverConfig?.environment.capabilities,
+  );
+  const supportsHours = selectedThreshold.key === "sidebarAutoSettleAfterHours";
+  const threshold =
+    selectedThreshold.value === undefined ? AUTO_SETTLE_DEFAULT_DAYS : selectedThreshold.value;
+  const thresholdPatch = (value: number | null): Partial<AutoSettleSettings> =>
+    supportsHours ? { sidebarAutoSettleAfterHours: value } : { sidebarAutoSettleAfterDays: value };
 
   return (
     <>
@@ -675,12 +693,16 @@ function AutoSettleSettingsRows() {
       <SettingsSwitchRow
         icon="clock"
         label="Auto-settle inactive threads"
-        value={afterHours !== null}
+        value={threshold !== null}
         onValueChange={(value) =>
-          writeToAll({ sidebarAutoSettleAfterHours: value ? AUTO_SETTLE_DEFAULT_HOURS : null })
+          writeToAll(
+            thresholdPatch(
+              value ? (supportsHours ? AUTO_SETTLE_DEFAULT_HOURS : AUTO_SETTLE_DEFAULT_DAYS) : null,
+            ),
+          )
         }
       />
-      {afterHours !== null ? (
+      {threshold !== null ? (
         <View
           className={cn(
             "flex-row items-center gap-4 px-4",
@@ -694,12 +716,19 @@ function AutoSettleSettingsRows() {
               Platform.OS === "android" ? "text-base" : "text-lg",
             )}
           >
-            Inactive hours
+            {supportsHours ? "Inactive hours" : "Inactive days"}
           </Text>
-          <AutoSettleHoursField
-            value={afterHours}
-            onValueChange={(value) => writeToAll({ sidebarAutoSettleAfterHours: value })}
-          />
+          {supportsHours ? (
+            <AutoSettleHoursField
+              value={threshold}
+              onValueChange={(value) => writeToAll(thresholdPatch(value))}
+            />
+          ) : (
+            <AutoSettleDaysField
+              value={threshold}
+              onValueChange={(value) => writeToAll(thresholdPatch(value))}
+            />
+          )}
         </View>
       ) : null}
       {pendingWrites === 0 && mismatches.length > 0 ? (

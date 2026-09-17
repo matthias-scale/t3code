@@ -1,4 +1,4 @@
-import { adaptServerSettingsPatchForCapabilities } from "@t3tools/client-runtime/state/shared-settings";
+import { filterAutoSettleSettingsPatchForCapabilities } from "@t3tools/client-runtime/state/shared-settings";
 import type {
   EnvironmentId,
   ExecutionEnvironmentCapabilities,
@@ -7,13 +7,14 @@ import type {
 
 export type AutoSettleSettings = Pick<
   ServerSettings,
-  "sidebarAutoSettleAfterHours" | "sidebarAutoSettleOnMerge"
+  "sidebarAutoSettleAfterHours" | "sidebarAutoSettleAfterDays" | "sidebarAutoSettleOnMerge"
 >;
 
 interface AutoSettleSyncTarget {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly settings: AutoSettleSettings | null;
+  readonly capabilities?: Pick<ExecutionEnvironmentCapabilities, "threadAutoSettlementHours">;
 }
 
 interface AutoSettleWriteTarget {
@@ -25,26 +26,42 @@ export function planAutoSettleSettingsWrites(
   patch: Partial<AutoSettleSettings>,
   targets: readonly AutoSettleWriteTarget[],
 ) {
-  return targets.map((target) => ({
-    environmentId: target.environmentId,
-    patch: adaptServerSettingsPatchForCapabilities(patch, target.capabilities),
-  }));
+  return targets.flatMap((target) => {
+    const filtered = filterAutoSettleSettingsPatchForCapabilities(patch, target.capabilities);
+    return Object.keys(filtered).length === 0
+      ? []
+      : [{ environmentId: target.environmentId, patch: filtered }];
+  });
 }
 
 /** Receives connected, capable targets. Applying these defaults must preserve other settings. */
 export function planAutoSettleSettingsSync(
-  reference: { readonly environmentId: EnvironmentId; readonly settings: AutoSettleSettings },
+  reference: {
+    readonly environmentId: EnvironmentId;
+    readonly settings: AutoSettleSettings;
+    readonly capabilities?: Pick<ExecutionEnvironmentCapabilities, "threadAutoSettlementHours">;
+  },
   targets: readonly AutoSettleSyncTarget[],
 ) {
-  const patch: AutoSettleSettings = {
-    sidebarAutoSettleAfterHours: reference.settings.sidebarAutoSettleAfterHours,
+  const supportsHours = reference.capabilities?.threadAutoSettlementHours === true;
+  const patch: Partial<AutoSettleSettings> = {
+    ...(supportsHours
+      ? { sidebarAutoSettleAfterHours: reference.settings.sidebarAutoSettleAfterHours }
+      : reference.settings.sidebarAutoSettleAfterDays === undefined
+        ? {}
+        : { sidebarAutoSettleAfterDays: reference.settings.sidebarAutoSettleAfterDays }),
     sidebarAutoSettleOnMerge: reference.settings.sidebarAutoSettleOnMerge,
   };
   const mismatches = targets.filter(
     (target) =>
       target.environmentId !== reference.environmentId &&
       target.settings !== null &&
-      (target.settings.sidebarAutoSettleAfterHours !== patch.sidebarAutoSettleAfterHours ||
+      (((target.capabilities?.threadAutoSettlementHours === true) === supportsHours &&
+        (supportsHours
+          ? target.settings.sidebarAutoSettleAfterHours !==
+            reference.settings.sidebarAutoSettleAfterHours
+          : target.settings.sidebarAutoSettleAfterDays !==
+            reference.settings.sidebarAutoSettleAfterDays)) ||
         target.settings.sidebarAutoSettleOnMerge !== patch.sidebarAutoSettleOnMerge),
   );
   return { patch, mismatches };

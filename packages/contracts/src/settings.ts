@@ -84,15 +84,16 @@ export const SidebarAutoSettleAfterHours = Schema.Number.check(
   }),
 );
 export type SidebarAutoSettleAfterHours = typeof SidebarAutoSettleAfterHours.Type;
-
-/** Keep legacy clients from settling earlier than the configured hour threshold. */
-export const legacySidebarAutoSettleAfterDays = (
-  hours: SidebarAutoSettleAfterHours | null,
-): number | null => (hours === null ? null : Math.max(1, Math.ceil(hours / 24)));
 const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_HOURS: SidebarAutoSettleAfterHours = 12;
-const LegacySidebarAutoSettleAfterDays = Schema.Number.check(
-  Schema.isBetween({ minimum: 1, maximum: 90 }),
+export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
+export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
+export const SidebarAutoSettleAfterDays = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+    maximum: MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  }),
 );
+export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
 export const MIN_GLASS_OPACITY = 40;
 export const MAX_GLASS_OPACITY = 100;
 export const GlassOpacity = Schema.Int.check(
@@ -1011,6 +1012,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "pullRequestMergeMethod",
   "sidebarAutoSettleOnMerge",
   "sidebarAutoSettleAfterHours",
+  "sidebarAutoSettleAfterDays",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
 ] as const;
@@ -1037,43 +1039,14 @@ const ProjectSettingsOverridesCurrent = Schema.Struct({
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
-const ProjectSettingsOverridesEncoded = Schema.Struct({
-  ...ProjectSettingsOverridesCurrent.fields,
-  sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
-});
 const ProjectSettingsOverridesPatch = Schema.Struct({
   ...ProjectSettingsOverridesCurrent.fields,
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
 });
-export const ProjectSettingsOverrides = ProjectSettingsOverridesEncoded.pipe(
-  Schema.decodeTo(
-    Schema.toType(ProjectSettingsOverridesCurrent),
-    SchemaTransformation.transform({
-      decode: ({ sidebarAutoSettleAfterDays, ...settings }) =>
-        settings.sidebarAutoSettleAfterHours !== undefined ||
-        sidebarAutoSettleAfterDays === undefined
-          ? settings
-          : {
-              ...settings,
-              sidebarAutoSettleAfterHours:
-                sidebarAutoSettleAfterDays === null ? null : sidebarAutoSettleAfterDays * 24,
-            },
-      encode: (settings) => {
-        const hours = settings.sidebarAutoSettleAfterHours;
-        return hours === undefined
-          ? settings
-          : {
-              ...settings,
-              sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
-            };
-      },
-    }),
-  ),
-);
+export const ProjectSettingsOverrides = ProjectSettingsOverridesCurrent;
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
 export const StorageCleanupSettings = Schema.Struct({
@@ -1173,6 +1146,7 @@ const ServerSettingsCurrent = Schema.Struct({
   sidebarAutoSettleAfterHours: Schema.NullOr(SidebarAutoSettleAfterHours).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_HOURS)),
   ),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -1283,55 +1257,7 @@ const ServerSettingsCurrent = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 });
-const ServerSettingsEncoded = Schema.Struct({
-  ...ServerSettingsCurrent.fields,
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
-});
-const ServerSettingsWire = Schema.toEncoded(ServerSettingsEncoded);
-const CurrentServerSettingsEncoded = Schema.toEncoded(ServerSettingsCurrent);
-const decodeServerSettingsWire = Schema.decodeUnknownEffect(ServerSettingsWire);
-const decodeCurrentServerSettingsEncoded = Schema.decodeUnknownEffect(CurrentServerSettingsEncoded);
-
-function migrateServerSettingsEncoded(settings: Readonly<Record<string, unknown>>) {
-  const { sidebarAutoSettleAfterDays, ...current } = settings;
-  if (
-    current.sidebarAutoSettleAfterHours !== undefined ||
-    sidebarAutoSettleAfterDays === undefined
-  ) {
-    return current;
-  }
-  return {
-    ...current,
-    sidebarAutoSettleAfterHours:
-      sidebarAutoSettleAfterDays === null || typeof sidebarAutoSettleAfterDays !== "number"
-        ? sidebarAutoSettleAfterDays
-        : sidebarAutoSettleAfterDays * 24,
-  };
-}
-
-const ServerSettingsCodec = ServerSettingsWire.pipe(
-  Schema.decodeTo(
-    ServerSettingsCurrent,
-    SchemaTransformation.transformOrFail({
-      decode: (settings) =>
-        decodeCurrentServerSettingsEncoded(migrateServerSettingsEncoded(settings)).pipe(
-          Effect.mapError((error) => error.issue),
-        ),
-      encode: (settings) => {
-        const hours = settings.sidebarAutoSettleAfterHours;
-        return decodeServerSettingsWire(
-          hours === undefined
-            ? settings
-            : {
-                ...settings,
-                sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
-              },
-        ).pipe(Effect.mapError((error) => error.issue));
-      },
-    }),
-  ),
-);
-export const ServerSettings = Object.assign(ServerSettingsCodec, {
+export const ServerSettings = Object.assign(ServerSettingsCurrent, {
   fields: ServerSettingsCurrent.fields,
 });
 export type ServerSettings = typeof ServerSettings.Type;
@@ -1547,7 +1473,7 @@ export const ServerSettingsPatch = Schema.Struct({
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
   sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

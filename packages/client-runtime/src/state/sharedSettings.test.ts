@@ -6,12 +6,14 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import {
-  adaptServerSettingsPatchForCapabilities,
+  filterAutoSettleSettingsPatchForCapabilities,
   filterSharedServerPatch,
   findSharedSettingsMismatches,
   pickSharedServerSettings,
+  selectAutoSettleThreshold,
   splitSharedServerPatch,
   supportsSharedSettingsSync,
 } from "./sharedSettings.ts";
@@ -120,6 +122,13 @@ describe("splitSharedServerPatch", () => {
       defaultThreadEnvMode: "worktree",
     });
   });
+
+  it("routes the legacy days preference through shared settings unchanged", () => {
+    expect(splitSharedServerPatch({ sidebarAutoSettleAfterDays: 3 })).toEqual({
+      sharedPatch: { sidebarAutoSettleAfterDays: 3 },
+      localPatch: {},
+    });
+  });
 });
 
 describe("pickSharedServerSettings", () => {
@@ -135,30 +144,105 @@ describe("pickSharedServerSettings", () => {
       "textGenerationModelSelection",
     ]);
   });
+
+  it("reads only the settlement unit advertised by the server", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      sidebarAutoSettleAfterHours: 12,
+      sidebarAutoSettleAfterDays: 3,
+    };
+    expect(pickSharedServerSettings(settings, { threadAutoSettlementHours: true })).toMatchObject({
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(
+      pickSharedServerSettings(settings, { threadAutoSettlementHours: true }),
+    ).not.toHaveProperty("sidebarAutoSettleAfterDays");
+    expect(pickSharedServerSettings(settings, {})).toMatchObject({
+      sidebarAutoSettleAfterDays: 3,
+    });
+    expect(pickSharedServerSettings(settings, {})).not.toHaveProperty(
+      "sidebarAutoSettleAfterHours",
+    );
+  });
+
+  it("reads project overrides in the server's advertised unit", () => {
+    const projectId = ProjectId.make("project");
+    const current = resolveProjectSettings(
+      {
+        ...DEFAULT_SERVER_SETTINGS,
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterHours: 4 },
+        },
+      },
+      projectId,
+    ).settings;
+    const legacy = resolveProjectSettings(
+      {
+        ...DEFAULT_SERVER_SETTINGS,
+        sidebarAutoSettleAfterDays: 3,
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterDays: 7 },
+        },
+      },
+      projectId,
+    ).settings;
+
+    expect(selectAutoSettleThreshold(current, { threadAutoSettlementHours: true })).toEqual({
+      key: "sidebarAutoSettleAfterHours",
+      value: 4,
+    });
+    expect(selectAutoSettleThreshold(legacy, {})).toEqual({
+      key: "sidebarAutoSettleAfterDays",
+      value: 7,
+    });
+  });
 });
 
 describe("filterSharedServerPatch", () => {
-  it("writes days to legacy servers and hours to current servers", () => {
-    const patch = { sidebarAutoSettleAfterHours: 25 };
-    expect(filterSharedServerPatch(patch, {})).toEqual({ sidebarAutoSettleAfterDays: 2 });
-    expect(filterSharedServerPatch(patch, { threadAutoSettlementHours: true })).toEqual(patch);
+  it("keeps only the settlement unit advertised by the target", () => {
+    const patch = { sidebarAutoSettleAfterHours: 25, sidebarAutoSettleAfterDays: 3 };
+    expect(filterSharedServerPatch(patch, {})).toEqual({ sidebarAutoSettleAfterDays: 3 });
+    expect(filterSharedServerPatch(patch, { threadAutoSettlementHours: true })).toEqual({
+      sidebarAutoSettleAfterHours: 25,
+    });
   });
 
-  it("preserves null and converts project overrides for legacy servers", () => {
+  it("never sends hours to an old server or overwrites its stored days", () => {
+    const stored = { sidebarAutoSettleAfterDays: 3, sidebarAutoSettleOnMerge: true };
+    const patch = filterSharedServerPatch(
+      { sidebarAutoSettleAfterHours: 12, sidebarAutoSettleOnMerge: false },
+      {},
+    );
+
+    expect(patch).toEqual({ sidebarAutoSettleOnMerge: false });
+    expect(patch).not.toHaveProperty("sidebarAutoSettleAfterHours");
+    expect({ ...stored, ...patch }).toEqual({
+      sidebarAutoSettleAfterDays: 3,
+      sidebarAutoSettleOnMerge: false,
+    });
+  });
+
+  it("gates complete project override entries without converting values", () => {
+    const projectId = ProjectId.make("project");
     expect(
-      adaptServerSettingsPatchForCapabilities(
+      filterAutoSettleSettingsPatchForCapabilities(
         {
-          sidebarAutoSettleAfterHours: null,
+          sidebarAutoSettleAfterHours: 12,
+          sidebarAutoSettleAfterDays: 3,
           projectSettingsOverrides: {
-            [ProjectId.make("project")]: { sidebarAutoSettleAfterHours: 1 },
+            [projectId]: {
+              sidebarAutoSettleAfterHours: null,
+              sidebarAutoSettleAfterDays: 7,
+              defaultAutoPull: true,
+            },
           },
         },
         {},
       ),
     ).toEqual({
-      sidebarAutoSettleAfterDays: null,
+      sidebarAutoSettleAfterDays: 3,
       projectSettingsOverrides: {
-        [ProjectId.make("project")]: { sidebarAutoSettleAfterDays: 1 },
+        [projectId]: { sidebarAutoSettleAfterDays: 7, defaultAutoPull: true },
       },
     });
   });
@@ -262,7 +346,7 @@ describe("filterSharedServerPatch", () => {
           { continueThreadsAfterServerUpdate: true, sidebarAutoSettleAfterHours: 7 },
           capabilities,
         ),
-      ).toEqual({ sidebarAutoSettleAfterDays: 1 });
+      ).toEqual({});
       expect(pickSharedServerSettings(DEFAULT_SERVER_SETTINGS, capabilities)).not.toHaveProperty(
         "continueThreadsAfterServerUpdate",
       );
@@ -340,7 +424,7 @@ describe("findSharedSettingsMismatches", () => {
           environments: [
             {
               ...environment,
-              settings: { ...environment.settings, sidebarAutoSettleAfterHours: 14 },
+              settings: { ...environment.settings, sidebarAutoSettleOnMerge: false },
             },
           ],
         }),
@@ -352,24 +436,28 @@ describe("findSharedSettingsMismatches", () => {
     const mismatches = findSharedSettingsMismatches({
       primaryEnvironmentId: primaryId,
       primarySettings,
+      primaryCapabilities: restartCapabilities,
       environments: [
         {
           environmentId: primaryId,
           label: "Desktop",
           syncEligible: true,
           settings: primarySettings,
+          capabilities: restartCapabilities,
         },
         {
           environmentId: laptopId,
           label: "Laptop",
           syncEligible: true,
           settings: primarySettings,
+          capabilities: restartCapabilities,
         },
         {
           environmentId: boxId,
           label: "Remote Box",
           syncEligible: true,
           settings: DEFAULT_SERVER_SETTINGS,
+          capabilities: restartCapabilities,
         },
       ],
     });
