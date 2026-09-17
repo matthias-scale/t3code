@@ -2825,6 +2825,77 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         }),
     );
 
+    it.effect("bounds session index reads across all Codex homes", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-index-budget-claude-");
+        const workspaceRoot = yield* makeTempDir("t3code-index-budget-workspace-");
+        const homes = yield* Effect.all(
+          Array.from({ length: 4 }, (_, index) =>
+            makeTempDir(`t3code-index-budget-codex-${index}-`),
+          ),
+        );
+        const codexHomePath = homes[0]!;
+        const additionalHomes = homes.slice(1);
+        const indexPaths = new Set(homes.map((home) => path.join(home, "session_index.jsonl")));
+        const oversizedIndexPath = path.join(claudeHomePath, "oversized-session-index.jsonl");
+        yield* fileSystem.writeFileString(oversizedIndexPath, "x".repeat(5 * 1024 * 1024));
+
+        for (const [index, home] of homes.entries()) {
+          const sessionId = `01a0a0b4-3958-7382-82b2-b22b8bb830b${index}`;
+          yield* writeTranscript({
+            filePath: path.join(home, "sessions", "2026", "08", "24", `rollout-${sessionId}.jsonl`),
+            contents: encodeTranscriptRecord({
+              timestamp: "2026-08-24T10:00:00.000Z",
+              type: "session_meta",
+              payload: { id: sessionId, cwd: workspaceRoot },
+            }),
+            mtimeMs: nowMs - index * 1_000,
+          });
+        }
+
+        let indexBytesRead = 0;
+        const observedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          open: (target, options) =>
+            fileSystem.open(indexPaths.has(target) ? oversizedIndexPath : target, options).pipe(
+              Effect.map((file) =>
+                indexPaths.has(target)
+                  ? {
+                      ...file,
+                      stat: file.stat,
+                      readAlloc: (size: FileSystem.SizeInput) =>
+                        file.readAlloc(size).pipe(
+                          Effect.tap((chunk) =>
+                            Effect.sync(() => {
+                              if (Option.isSome(chunk)) {
+                                indexBytesRead += chunk.value.byteLength;
+                              }
+                            }),
+                          ),
+                        ),
+                    }
+                  : file,
+              ),
+            ),
+        });
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          codexAdditionalSessionHomes: additionalHomes,
+        }).pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+
+        expect(
+          result.candidates.find((candidate) => candidate.path === workspaceRoot)?.threadCount,
+        ).toBe(4);
+        expect(indexBytesRead).toBeLessThanOrEqual(16 * 1024 * 1024);
+      }),
+    );
+
     it.effect("bounds index growth after the opened-handle stat", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

@@ -8,6 +8,7 @@ import {
   AgentSessionImportProjectNotFoundError,
   AgentSessionSource,
   AgentSessionScanError,
+  type AgentSessionImportSource,
   isImportedAgentSessionMessageId,
   MessageId,
   ProjectId,
@@ -260,6 +261,48 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
     });
   });
 
+  const repinImportedCodexHome = Effect.fn("repinImportedCodexHome")(function* (
+    threadId: ThreadId,
+    source: AgentSessionImportSource,
+    sessionHomePath: string | undefined,
+    existingThread?: OrchestrationThread,
+  ) {
+    if (source.provider !== "codex" || sessionHomePath === undefined) return;
+    const resolvedThread =
+      existingThread === undefined
+        ? yield* snapshots.getThreadDetailById(threadId)
+        : Option.some(existingThread);
+    if (Option.isNone(resolvedThread) || hasNativeActivity(resolvedThread.value)) return;
+
+    const binding = yield* directory.getBinding(threadId);
+    if (Option.isNone(binding)) return;
+    const current = binding.value;
+    const cursor = current.resumeCursor;
+    if (
+      current.status !== "stopped" ||
+      current.provider !== "codex" ||
+      current.providerInstanceId !== source.providerInstanceId ||
+      cursor === null ||
+      typeof cursor !== "object" ||
+      Array.isArray(cursor) ||
+      !("threadId" in cursor) ||
+      cursor.threadId !== source.providerSessionId ||
+      ("homePath" in cursor && cursor.homePath === sessionHomePath)
+    ) {
+      return;
+    }
+
+    yield* directory.upsert(
+      {
+        threadId,
+        provider: current.provider,
+        providerInstanceId: current.providerInstanceId,
+        resumeCursor: { threadId: source.providerSessionId, homePath: sessionHomePath },
+      },
+      { onConflict: "updateStoppedMatchingSession" },
+    );
+  });
+
   yield* Stream.runForEach(threads, (outcome) =>
     Effect.gen(function* () {
       if (outcome._tag === "Skipped") {
@@ -275,6 +318,14 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
             yield* syncImportedTitle(threadId, outcome.canonicalTitle).pipe(
               Effect.catch((cause) =>
                 Effect.logWarning("Could not sync an imported Codex thread title", {
+                  threadId,
+                  cause,
+                }),
+              ),
+            );
+            yield* repinImportedCodexHome(threadId, outcome.source, outcome.sessionHomePath).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not repin an imported Codex thread home", {
                   threadId,
                   cause,
                 }),
@@ -344,6 +395,12 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
               });
             }
             yield* syncImportedTitle(threadId, thread.title, existingThread.value);
+            yield* repinImportedCodexHome(
+              threadId,
+              outcome.source,
+              thread.sessionHomePath,
+              existingThread.value,
+            );
           }
           yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
           return true;

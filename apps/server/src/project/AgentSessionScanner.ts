@@ -194,6 +194,7 @@ export type AgentSessionRecentThread =
       readonly _tag: "AlreadyImported";
       readonly source: AgentSessionImportSource;
       readonly canonicalTitle: string | null;
+      readonly sessionHomePath?: string;
     }
   | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
   | { readonly _tag: "Skipped" };
@@ -790,31 +791,33 @@ export const make = Effect.gen(function* () {
   const statOption = (target: string) =>
     fileSystem.stat(target).pipe(Effect.map(Option.some), Effect.orElseSucceed(Option.none));
 
-  /** Read with a maxBytes payload cap and a one-byte probe for concurrent growth. */
+  /** Read within maxBytes total, reserving one byte to detect concurrent growth. */
   const readFileStringBounded = Effect.fn("AgentSessionScanner.readFileStringBounded")(function* (
     target: string,
     maxBytes: number,
   ) {
+    if (maxBytes <= 0) return null;
     return yield* Effect.scoped(
       fileSystem.open(target, { flag: "r" }).pipe(
         Effect.flatMap((file) =>
           Effect.gen(function* () {
             const info = yield* file.stat;
-            if (info.type !== "File" || info.size > BigInt(maxBytes)) return null;
+            const payloadLimit = maxBytes - 1;
+            if (info.type !== "File" || info.size > BigInt(payloadLimit)) return null;
 
             const decoder = new TextDecoder();
             const chunks: Array<string> = [];
             let bytesRead = 0;
-            while (bytesRead <= maxBytes) {
+            while (bytesRead < maxBytes) {
               const next = yield* file.readAlloc(
-                Math.min(TRANSCRIPT_PREFIX_BYTES, maxBytes + 1 - bytesRead),
+                Math.min(TRANSCRIPT_PREFIX_BYTES, maxBytes - bytesRead),
               );
               if (Option.isNone(next) || next.value.byteLength === 0) {
                 chunks.push(decoder.decode());
                 return chunks.join("");
               }
               bytesRead += next.value.byteLength;
-              if (bytesRead > maxBytes) return null;
+              if (bytesRead > payloadLimit) return null;
               chunks.push(decoder.decode(next.value, { stream: true }));
             }
             return null;
@@ -1139,14 +1142,14 @@ export const make = Effect.gen(function* () {
       homePath: string,
       providerInstanceId: ProviderInstanceId,
       operationBudget: number,
+      indexReadBudget: number,
       sessionHomePath?: string,
     ) {
       const sessionsDir = path.join(homePath, "sessions");
       const indexPath = path.join(homePath, "session_index.jsonl");
-      const indexContents = yield* readFileStringBounded(
-        indexPath,
-        MAX_CODEX_SESSION_INDEX_BYTES,
-      ).pipe(Effect.orElseSucceed(() => null));
+      const indexContents = yield* readFileStringBounded(indexPath, indexReadBudget).pipe(
+        Effect.orElseSucceed(() => null),
+      );
       const indexedTitles =
         indexContents === null ? new Map<string, string>() : parseCodexSessionIndex(indexContents);
 
@@ -1366,6 +1369,10 @@ export const make = Effect.gen(function* () {
         MAX_DISCOVERY_OPERATIONS_PER_SOURCE / Math.max(1, homes.length),
       );
       const extraOperationBudgets = MAX_DISCOVERY_OPERATIONS_PER_SOURCE % Math.max(1, homes.length);
+      const baseIndexReadBudget = Math.floor(
+        MAX_CODEX_SESSION_INDEX_BYTES / Math.max(1, homes.length),
+      );
+      const extraIndexReadBudgets = MAX_CODEX_SESSION_INDEX_BYTES % Math.max(1, homes.length);
       for (const [index, home] of homes.entries()) {
         const operationBudget = baseOperationBudget + (index < extraOperationBudgets ? 1 : 0);
         if (operationBudget === 0) {
@@ -1378,6 +1385,7 @@ export const make = Effect.gen(function* () {
               home.homePath,
               home.providerInstanceId,
               operationBudget,
+              baseIndexReadBudget + (index < extraIndexReadBudgets ? 1 : 0),
               home.sessionHomePath,
             );
         truncated ||= discovered.truncated;
@@ -1618,6 +1626,9 @@ export const make = Effect.gen(function* () {
               _tag: "AlreadyImported",
               source: completedSource,
               canonicalTitle: transcript.canonicalTitle,
+              ...(transcript.sessionHomePath === undefined
+                ? {}
+                : { sessionHomePath: transcript.sessionHomePath }),
             });
           }
           if (

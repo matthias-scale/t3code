@@ -66,7 +66,7 @@ export const RecordImportedTranscriptInput = Schema.Struct({
 export type RecordImportedTranscriptInput = typeof RecordImportedTranscriptInput.Type;
 
 export interface ProviderSessionRuntimeUpsertOptions {
-  readonly onConflict?: "update" | "ignore";
+  readonly onConflict?: "update" | "ignore" | "updateStoppedMatchingSession";
 }
 
 /**
@@ -268,6 +268,23 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  const updateStoppedMatchingSessionRow = SqlSchema.void({
+    Request: ProviderSessionRuntimeDbRowSchema,
+    execute: (runtime) =>
+      sql`
+        UPDATE provider_session_runtime
+        SET
+          last_seen_at = ${runtime.lastSeenAt},
+          resume_cursor_json = ${runtime.resumeCursor}
+        WHERE thread_id = ${runtime.threadId}
+          AND provider_name = ${runtime.providerName}
+          AND provider_instance_id IS ${runtime.providerInstanceId}
+          AND status = 'stopped'
+          AND json_extract(resume_cursor_json, '$.threadId')
+            IS json_extract(${runtime.resumeCursor}, '$.threadId')
+      `,
+  });
+
   const recordImportedTranscriptRow = SqlSchema.void({
     Request: RecordImportedTranscriptRequestSchema,
     execute: ({ threadId, source }) =>
@@ -365,7 +382,12 @@ export const make = Effect.gen(function* () {
   });
 
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
-    (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
+    (options?.onConflict === "ignore"
+      ? insertRuntimeRow(runtime)
+      : options?.onConflict === "updateStoppedMatchingSession"
+        ? updateStoppedMatchingSessionRow(runtime)
+        : upsertRuntimeRow(runtime)
+    ).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.upsert:query",

@@ -693,6 +693,89 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
+    it.effect("does not repin a binding that no longer belongs to the untouched import", () =>
+      Effect.gen(function* () {
+        const thread = makeThread("codex");
+        const source = makeThreadOutcome(thread).source;
+        const threadId = ThreadId.make(
+          `import:${source.providerInstanceId}:${source.providerSessionId}`,
+        );
+        const baseBinding: ProviderSessionDirectory.ProviderRuntimeBinding = {
+          threadId,
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId: source.providerInstanceId,
+          status: "stopped",
+          resumeCursor: { threadId: source.providerSessionId },
+        };
+        const cases: ReadonlyArray<{
+          readonly binding: ProviderSessionDirectory.ProviderRuntimeBinding;
+          readonly nativeActivity?: boolean;
+        }> = [
+          { binding: { ...baseBinding, status: "running" } },
+          {
+            binding: { ...baseBinding, provider: ProviderDriverKind.make("claudeAgent") },
+          },
+          {
+            binding: {
+              ...baseBinding,
+              providerInstanceId: ProviderInstanceId.make("codex-work"),
+            },
+          },
+          { binding: { ...baseBinding, resumeCursor: { threadId: "newer-session" } } },
+          { binding: baseBinding, nativeActivity: true },
+        ];
+
+        for (const testCase of cases) {
+          const scanner = AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            recentThreads: () =>
+              Stream.succeed({
+                _tag: "AlreadyImported",
+                source,
+                canonicalTitle: null,
+                sessionHomePath: "/tmp/codex-extra",
+              }),
+          });
+          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+            upsert: () => Effect.die("must not repin a protected binding"),
+            getProvider: () => Effect.die("unused"),
+            recordImportedTranscript: () => Effect.die("must not rewrite completed history"),
+            getBinding: () => Effect.succeed(Option.some(testCase.binding)),
+            listThreadIds: () => Effect.die("unused"),
+            listBindings: () => Effect.die("unused"),
+          });
+          const engine = OrchestrationEngine.OrchestrationEngineService.of({
+            dispatch: () => Effect.die("must not modify an imported thread"),
+            readEvents: () => Stream.empty,
+            readThreadEvents: () => Stream.empty,
+            getThreadReplayStats: () => Effect.die("unused"),
+            streamDomainEvents: Stream.empty,
+            subscribeDomainEvents: Effect.succeed(Stream.empty),
+            latestSequence: Effect.succeed(0),
+          });
+
+          expect(
+            yield* runImport({
+              scanner,
+              engine,
+              directory,
+              snapshots: makeSnapshotsLayer({
+                project: makeProject(),
+                getThread: () =>
+                  Option.some(
+                    makeProjectedThread({
+                      source: "codex",
+                      imported: true,
+                      includeFollowup: testCase.nativeActivity ?? false,
+                    }),
+                  ),
+              }),
+            }),
+          ).toEqual({ importedCount: 1, skippedCount: 0 });
+        }
+      }),
+    );
+
     it.effect(
       "repairs a legacy title from imported history when the Codex index has no title",
       () =>
@@ -1109,7 +1192,7 @@ const integrationLayer = Layer.mergeAll(
 );
 
 it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
-  it.effect("syncs appended history and index titles from an additional Codex home", () =>
+  it.effect("repins an untouched import when an additional Codex home becomes the winner", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngine.OrchestrationEngineService;
       const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -1127,7 +1210,15 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       const additionalHome = path.join(fixtureDir, "codex-additional");
       const sessionId = "01a0a0b4-3958-7382-82b2-b22b8bb830bd";
       const threadId = ThreadId.make(`import:codex:${sessionId}`);
-      const transcriptPath = path.join(
+      const activeTranscriptPath = path.join(
+        codexHomePath,
+        "sessions",
+        "2026",
+        "08",
+        "24",
+        `rollout-${sessionId}.jsonl`,
+      );
+      const additionalTranscriptPath = path.join(
         additionalHome,
         "sessions",
         "2026",
@@ -1135,12 +1226,13 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         "24",
         `rollout-${sessionId}.jsonl`,
       );
-      const indexPath = path.join(additionalHome, "session_index.jsonl");
+      const activeIndexPath = path.join(codexHomePath, "session_index.jsonl");
+      const additionalIndexPath = path.join(additionalHome, "session_index.jsonl");
       const projectId = ProjectId.make("project-additional-codex-home");
       yield* fileSystem.makeDirectory(workspaceRoot, { recursive: true });
       yield* fileSystem.makeDirectory(claudeHomePath, { recursive: true });
-      yield* fileSystem.makeDirectory(codexHomePath, { recursive: true });
-      yield* fileSystem.makeDirectory(path.dirname(transcriptPath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(activeTranscriptPath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(additionalTranscriptPath), { recursive: true });
 
       const transcriptRecords = [
         encodeTranscriptRecord({
@@ -1163,12 +1255,18 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           },
         }),
       ];
-      yield* fileSystem.writeFileString(transcriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.writeFileString(activeTranscriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.writeFileString(additionalTranscriptPath, transcriptRecords.join("\n"));
       yield* fileSystem.writeFileString(
-        indexPath,
+        activeIndexPath,
         `${encodeTranscriptRecord({ id: sessionId, thread_name: "Initial title" })}\n`,
       );
-      yield* fileSystem.utimes(transcriptPath, nowMs / 1_000 - 2, nowMs / 1_000 - 2);
+      yield* fileSystem.writeFileString(
+        additionalIndexPath,
+        `${encodeTranscriptRecord({ id: sessionId, thread_name: "Stale extra title" })}\n`,
+      );
+      yield* fileSystem.utimes(activeTranscriptPath, nowMs / 1_000 - 1, nowMs / 1_000 - 1);
+      yield* fileSystem.utimes(additionalTranscriptPath, nowMs / 1_000 - 2, nowMs / 1_000 - 2);
 
       yield* engine.dispatch({
         type: "project.create",
@@ -1200,8 +1298,8 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId)).title).toBe(
         "Initial title",
       );
-      expect(Option.getOrThrow(yield* directory.getBinding(threadId))).toMatchObject({
-        resumeCursor: { threadId: sessionId, homePath: additionalHome },
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor).toEqual({
+        threadId: sessionId,
       });
 
       transcriptRecords.push(
@@ -1211,12 +1309,12 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
           payload: { type: "user_message", message: "Appended from the other home" },
         }),
       );
-      yield* fileSystem.writeFileString(transcriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.writeFileString(additionalTranscriptPath, transcriptRecords.join("\n"));
       yield* fileSystem.writeFileString(
-        indexPath,
+        additionalIndexPath,
         `${encodeTranscriptRecord({ id: sessionId, thread_name: "Renamed in Codex" })}\n`,
       );
-      yield* fileSystem.utimes(transcriptPath, nowMs / 1_000 - 1, nowMs / 1_000 - 1);
+      yield* fileSystem.utimes(additionalTranscriptPath, nowMs / 1_000 - 0.5, nowMs / 1_000 - 0.5);
 
       expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
       expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
@@ -1227,6 +1325,10 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         "Initial response",
         "Appended from the other home",
       ]);
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor).toEqual({
+        threadId: sessionId,
+        homePath: additionalHome,
+      });
     }),
   );
 
