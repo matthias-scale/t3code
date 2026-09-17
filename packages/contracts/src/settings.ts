@@ -84,6 +84,11 @@ export const SidebarAutoSettleAfterHours = Schema.Number.check(
   }),
 );
 export type SidebarAutoSettleAfterHours = typeof SidebarAutoSettleAfterHours.Type;
+
+/** Keep legacy clients from settling earlier than the configured hour threshold. */
+export const legacySidebarAutoSettleAfterDays = (
+  hours: SidebarAutoSettleAfterHours | null,
+): number | null => (hours === null ? null : Math.max(1, Math.ceil(hours / 24)));
 const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_HOURS: SidebarAutoSettleAfterHours = 12;
 const LegacySidebarAutoSettleAfterDays = Schema.Number.check(
   Schema.isBetween({ minimum: 1, maximum: 90 }),
@@ -1057,7 +1062,15 @@ export const ProjectSettingsOverrides = ProjectSettingsOverridesEncoded.pipe(
               sidebarAutoSettleAfterHours:
                 sidebarAutoSettleAfterDays === null ? null : sidebarAutoSettleAfterDays * 24,
             },
-      encode: (settings) => settings,
+      encode: (settings) => {
+        const hours = settings.sidebarAutoSettleAfterHours;
+        return hours === undefined
+          ? settings
+          : {
+              ...settings,
+              sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
+            };
+      },
     }),
   ),
 );
@@ -1304,8 +1317,17 @@ const ServerSettingsCodec = ServerSettingsWire.pipe(
         decodeCurrentServerSettingsEncoded(migrateServerSettingsEncoded(settings)).pipe(
           Effect.mapError((error) => error.issue),
         ),
-      encode: (settings) =>
-        decodeServerSettingsWire(settings).pipe(Effect.mapError((error) => error.issue)),
+      encode: (settings) => {
+        const hours = settings.sidebarAutoSettleAfterHours;
+        return decodeServerSettingsWire(
+          hours === undefined
+            ? settings
+            : {
+                ...settings,
+                sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
+              },
+        ).pipe(Effect.mapError((error) => error.issue));
+      },
     }),
   ),
 );

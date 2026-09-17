@@ -8,11 +8,12 @@
  * sync target, and warn when another target still holds a different value so
  * the user can push their current value out.
  */
-import type {
-  EnvironmentId,
-  ExecutionEnvironmentCapabilities,
-  ServerSettings,
-  ServerSettingsPatch,
+import {
+  legacySidebarAutoSettleAfterDays,
+  type EnvironmentId,
+  type ExecutionEnvironmentCapabilities,
+  type ServerSettings,
+  type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import { isModelSelectionProviderEnabled } from "@t3tools/shared/serverSettings";
 import * as Equal from "effect/Equal";
@@ -39,9 +40,6 @@ type SharedSettingsCapabilities = Pick<
   "threadAutoSettlementHours" | "threadRestartContinuation"
 >;
 
-const legacyAutoSettleDays = (hours: number | null) =>
-  hours === null ? null : Math.max(1, Math.ceil(hours / 24));
-
 /** Encode hour-based settlement settings for the target server's patch contract. */
 export function adaptServerSettingsPatchForCapabilities(
   patch: ServerSettingsPatch,
@@ -61,7 +59,7 @@ export function adaptServerSettingsPatchForCapabilities(
             const { sidebarAutoSettleAfterHours: hours, ...current } = entry;
             return [
               projectId,
-              { ...current, sidebarAutoSettleAfterDays: legacyAutoSettleDays(hours) },
+              { ...current, sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours) },
             ];
           }),
         );
@@ -70,7 +68,9 @@ export function adaptServerSettingsPatchForCapabilities(
     ...rest,
     ...(sidebarAutoSettleAfterHours === undefined
       ? {}
-      : { sidebarAutoSettleAfterDays: legacyAutoSettleDays(sidebarAutoSettleAfterHours) }),
+      : {
+          sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(sidebarAutoSettleAfterHours),
+        }),
     ...(adaptedProjectSettingsOverrides === undefined
       ? {}
       : { projectSettingsOverrides: adaptedProjectSettingsOverrides }),

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -21,6 +23,24 @@ const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeUnknownServerSettings = Schema.encodeUnknownSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+const Legacy042SidebarAutoSettleAfterDays = Schema.Number.check(
+  Schema.isBetween({ minimum: 1, maximum: 90 }),
+);
+const Legacy042ProjectSettingsOverrides = Schema.Struct({
+  sidebarAutoSettleAfterDays: Schema.optionalKey(
+    Schema.NullOr(Legacy042SidebarAutoSettleAfterDays),
+  ),
+});
+const Legacy042ServerSettings = Schema.Struct({
+  sidebarAutoSettleAfterDays: Schema.NullOr(Legacy042SidebarAutoSettleAfterDays).pipe(
+    Schema.withDecodingDefault(Effect.succeed(3)),
+  ),
+  projectSettingsOverrides: Schema.Record(ProjectId, Legacy042ProjectSettingsOverrides).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+});
+const decodeLegacy042ServerSettings = Schema.decodeUnknownSync(Legacy042ServerSettings);
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
@@ -699,9 +719,38 @@ describe("ServerSettings thread settlement", () => {
     });
   });
 
+  it.each([
+    { hours: 12, days: 1 },
+    { hours: null, days: null },
+    { hours: 30, days: 2 },
+  ])("encodes $hours hours for a 0.0.42 client as $days days", ({ hours, days }) => {
+    const encoded = encodeServerSettings(
+      decodeServerSettings({
+        sidebarAutoSettleAfterHours: hours,
+        projectSettingsOverrides: {
+          project: { sidebarAutoSettleAfterHours: hours },
+        },
+      }),
+    );
+
+    expect(encoded).toMatchObject({
+      sidebarAutoSettleAfterHours: hours,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterHours: hours },
+      },
+    });
+    expect(decodeLegacy042ServerSettings(encoded)).toEqual({
+      sidebarAutoSettleAfterDays: days,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterDays: days },
+      },
+    });
+  });
+
   it("encodes sparse and migrated settings without requiring unrelated keys", () => {
     expect(encodeUnknownServerSettings({ sidebarAutoSettleAfterHours: 24 })).toEqual({
       sidebarAutoSettleAfterHours: 24,
+      sidebarAutoSettleAfterDays: 1,
     });
 
     const encoded = encodeServerSettings(
@@ -712,9 +761,9 @@ describe("ServerSettings thread settlement", () => {
     );
     expect(encoded).toMatchObject({
       sidebarAutoSettleAfterHours: 72,
+      sidebarAutoSettleAfterDays: 3,
       enableAgentBrowserAccess: false,
     });
-    expect(encoded).not.toHaveProperty("sidebarAutoSettleAfterDays");
   });
 
   it.each([-1, 0, 2161])("rejects an auto-settle threshold outside 1..2160 hours: %s", (value) => {
