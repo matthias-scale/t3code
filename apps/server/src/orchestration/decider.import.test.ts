@@ -174,6 +174,120 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
     }),
   );
 
+  it.effect("appends imported history without changing settlement", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const settledAt = "2026-08-24T10:01:00.000Z";
+      const threadId = ThreadId.make("import:claudeAgent:session-append");
+      let readModel = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-append-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-append-thread-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-append-thread-created"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "Imported thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-5",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      readModel = yield* projectEvent(readModel, {
+        sequence: 2,
+        eventId: EventId.make("event-existing-imported-message"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-existing-imported-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-existing-imported-message"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          messageId: MessageId.make(`${threadId}:000000`),
+          role: "user",
+          text: "First prompt",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      readModel = yield* projectEvent(readModel, {
+        sequence: 3,
+        eventId: EventId.make("event-existing-import-settled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.settled",
+        occurredAt: settledAt,
+        commandId: CommandId.make("command-existing-import-settled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-existing-import-settled"),
+        metadata: { historyImport: true },
+        payload: { threadId, settledAt, updatedAt: settledAt },
+      });
+
+      const events = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.history.append",
+          commandId: CommandId.make("command-append-history"),
+          threadId,
+          messages: [
+            {
+              messageId: MessageId.make(`${threadId}:000001`),
+              role: "assistant",
+              text: "Later answer",
+              createdAt: "2026-08-24T10:02:00.000Z",
+            },
+          ],
+        },
+        readModel,
+      });
+
+      expect(events).toMatchObject([
+        {
+          type: "thread.message-sent",
+          metadata: { historyImport: true },
+          payload: {
+            messageId: `${threadId}:000001`,
+            role: "assistant",
+            text: "Later answer",
+            turnId: null,
+            streaming: false,
+          },
+        },
+      ]);
+      expect(Array.isArray(events) ? events : [events]).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "thread.settled" })]),
+      );
+
+      let projected = readModel;
+      for (const [index, event] of (Array.isArray(events) ? events : [events]).entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 4 });
+      }
+      expect(projected.threads[0]?.messages.map((message) => message.text)).toEqual([
+        "First prompt",
+        "Later answer",
+      ]);
+      expect(projected.threads[0]?.settledAt).toBe(settledAt);
+    }),
+  );
+
   it.effect("allows a thread with a newly imported user message to be settled", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:00:00.000Z";

@@ -1449,6 +1449,29 @@ const ThreadHistoryImportCommand = Schema.Struct({
   ).check(Schema.isNonEmpty()),
 });
 
+const ThreadHistoryAppendCommand = Schema.Struct({
+  type: Schema.Literal("thread.history.append"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messages: Schema.Array(
+    Schema.Struct({
+      messageId: MessageId,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String,
+      createdAt: IsoDateTime,
+    }),
+  ).check(Schema.isNonEmpty()),
+});
+
+const ThreadImportedTitleSyncCommand = Schema.Struct({
+  type: Schema.Literal("thread.title.import.sync"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  expectedTitle: TrimmedNonEmptyString,
+  expectedVersion: Schema.NullOr(CommandId),
+  title: TrimmedNonEmptyString,
+});
+
 /**
  * Persists a user message without starting a turn. Used by worktree bootstraps
  * so the send is durable while the worktree is still being prepared; the
@@ -1564,6 +1587,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadHistoryImportCommand,
+  ThreadHistoryAppendCommand,
+  ThreadImportedTitleSyncCommand,
   ThreadMessageUserAppendCommand,
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,

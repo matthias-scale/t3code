@@ -70,6 +70,15 @@ function hasImportedHistory(thread: OrchestrationThread): boolean {
   return thread.messages.some((message) => isImportedAgentSessionMessageId(message.id));
 }
 
+function hasNativeActivity(thread: OrchestrationThread): boolean {
+  return (
+    thread.latestTurn !== null ||
+    thread.session !== null ||
+    thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id)) ||
+    thread.proposedPlans.length > 0
+  );
+}
+
 /** Identify titles produced by the old first-line Codex import fallback. */
 function hasLegacyCodexContextTitle(title: string): boolean {
   return (
@@ -88,6 +97,68 @@ function deriveImportedCodexTitle(thread: OrchestrationThread): string | null {
     if (title !== null) return title;
   }
   return null;
+}
+
+function nextImportedMessages(
+  threadId: ThreadId,
+  existingThread: OrchestrationThread,
+  providerThread: AgentSessionScanner.AgentSessionThread,
+) {
+  const importedMessages = existingThread.messages.filter((message) =>
+    isImportedAgentSessionMessageId(message.id),
+  );
+  const latestImported = importedMessages.at(-1);
+  if (latestImported === undefined) return [];
+
+  const messageIdPrefix = `${threadId}:`;
+  const importedIndex = (messageId: MessageId) => {
+    if (!messageId.startsWith(messageIdPrefix)) return null;
+    const suffix = messageId.slice(messageIdPrefix.length);
+    return /^\d+$/.test(suffix) ? Number(suffix) : null;
+  };
+  const matchesLatestImported = (index: number) => {
+    const message = providerThread.messages[index];
+    return (
+      message !== undefined &&
+      message.role === latestImported.role &&
+      message.text === latestImported.text &&
+      message.createdAt === latestImported.createdAt
+    );
+  };
+
+  const latestImportedIndex = importedIndex(latestImported.id);
+  let latestProviderIndex =
+    latestImportedIndex === null
+      ? -1
+      : providerThread.messages.findIndex(
+          (message, index) =>
+            message.importIndex === latestImportedIndex && matchesLatestImported(index),
+        );
+  const providerIndicesMatch = latestProviderIndex !== -1;
+  if (!providerIndicesMatch) {
+    for (let index = providerThread.messages.length - 1; index >= 0; index -= 1) {
+      if (matchesLatestImported(index)) {
+        latestProviderIndex = index;
+        break;
+      }
+    }
+  }
+  if (latestProviderIndex === -1) return [];
+
+  const nextMessageIndex =
+    importedMessages.reduce((maximum, message) => {
+      const index = importedIndex(message.id);
+      return index === null ? maximum : Math.max(maximum, index);
+    }, -1) + 1;
+
+  return providerThread.messages.slice(latestProviderIndex + 1).map((message, offset) => ({
+    messageId: MessageId.make(
+      `${threadId}:${String(providerIndicesMatch ? message.importIndex : nextMessageIndex + offset).padStart(6, "0")}`,
+    ),
+    role: message.role,
+    text: message.text,
+    createdAt: message.createdAt,
+  }));
 }
 
 function hasImportBlockingActivity(
@@ -156,29 +227,36 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   let importedCount = 0;
   let skippedCount = 0;
 
-  const repairImportedCodexTitle = Effect.fn("repairImportedCodexTitle")(function* (
+  const syncImportedTitle = Effect.fn("syncImportedTitle")(function* (
     threadId: ThreadId,
-    canonicalTitle: string | null,
+    providerTitle: string | null,
+    existingThread?: OrchestrationThread,
   ) {
-    const existingThread = yield* snapshots.getThreadDetailById(threadId);
-    if (Option.isNone(existingThread)) return;
-    const existingTitle = existingThread.value.title;
-    const replacementTitle = canonicalTitle ?? deriveImportedCodexTitle(existingThread.value);
+    const resolvedThread =
+      existingThread === undefined
+        ? yield* snapshots.getThreadDetailById(threadId)
+        : Option.some(existingThread);
+    if (Option.isNone(resolvedThread) || hasNativeActivity(resolvedThread.value)) return;
+    const existingTitle = resolvedThread.value.title;
+    const replacementTitle =
+      providerTitle ??
+      (hasLegacyCodexContextTitle(existingTitle)
+        ? deriveImportedCodexTitle(resolvedThread.value)
+        : null);
     if (
       replacementTitle === null ||
-      !hasLegacyCodexContextTitle(existingTitle) ||
+      resolvedThread.value.titleState?.source === "manual" ||
       existingTitle === replacementTitle
     ) {
       return;
     }
     yield* engine.dispatch({
-      type: "thread.title.generate.complete",
+      type: "thread.title.import.sync",
       commandId: CommandId.make(yield* crypto.randomUUIDv4),
       threadId,
       title: replacementTitle,
       expectedTitle: existingTitle,
-      expectedVersion: existingThread.value.titleState?.version ?? null,
-      needsRefinement: false,
+      expectedVersion: resolvedThread.value.titleState?.version ?? null,
     });
   });
 
@@ -194,9 +272,9 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
         );
         if (outcome._tag === "AlreadyImported") {
           if (outcome.source.provider === "codex") {
-            yield* repairImportedCodexTitle(threadId, outcome.canonicalTitle).pipe(
+            yield* syncImportedTitle(threadId, outcome.canonicalTitle).pipe(
               Effect.catch((cause) =>
-                Effect.logWarning("Could not repair an imported Codex thread title", {
+                Effect.logWarning("Could not sync an imported Codex thread title", {
                   threadId,
                   cause,
                 }),
@@ -255,15 +333,17 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
           importedHistoryPresent &&
           Option.isSome(existingBinding)
         ) {
-          if (thread.source === "codex") {
-            yield* repairImportedCodexTitle(threadId, thread.title).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Could not repair an imported Codex thread title", {
-                  threadId,
-                  cause,
-                }),
-              ),
-            );
+          if (!hasNativeActivity(existingThread.value)) {
+            const appendedMessages = nextImportedMessages(threadId, existingThread.value, thread);
+            if (appendedMessages.length > 0) {
+              yield* engine.dispatch({
+                type: "thread.history.append",
+                commandId: CommandId.make(yield* crypto.randomUUIDv4),
+                threadId,
+                messages: appendedMessages,
+              });
+            }
+            yield* syncImportedTitle(threadId, thread.title, existingThread.value);
           }
           yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
           return true;
@@ -328,8 +408,10 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
             type: "thread.history.import",
             commandId: CommandId.make(yield* crypto.randomUUIDv4),
             threadId,
-            messages: thread.messages.map((message, index) => ({
-              messageId: MessageId.make(`${threadId}:${String(index).padStart(6, "0")}`),
+            messages: thread.messages.map((message) => ({
+              messageId: MessageId.make(
+                `${threadId}:${String(message.importIndex).padStart(6, "0")}`,
+              ),
               role: message.role,
               text: message.text,
               createdAt: message.createdAt,

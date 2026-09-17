@@ -2855,6 +2855,28 @@ describe("parseAgentSessionTranscript", () => {
     });
   });
 
+  it("prefers the latest Claude custom title over AI and message titles", () => {
+    const thread = AgentSessionScanner.parseAgentSessionTranscript({
+      contents: [
+        JSON.stringify({ type: "custom-title", customTitle: "First manual title" }),
+        JSON.stringify({ type: "ai-title", aiTitle: "Generated title" }),
+        JSON.stringify({
+          type: "user",
+          sessionId: "claude-session",
+          message: { role: "user", content: "First visible message" },
+        }),
+        JSON.stringify({ type: "custom-title", customTitle: "Latest manual title" }),
+        JSON.stringify({ type: "ai-title", aiTitle: "Later generated title" }),
+      ].join("\n"),
+      source: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      fallbackSessionId: "fallback",
+      lastActiveAtMs: Date.parse("2026-08-24T12:00:00.000Z"),
+    });
+
+    expect(thread?.title).toBe("Latest manual title");
+  });
+
   it("drops injected Codex instructions while keeping the visible user event", () => {
     const thread = AgentSessionScanner.parseAgentSessionTranscript({
       contents: [
@@ -3469,5 +3491,8 @@ describe("parseAgentSessionTranscript", () => {
     expect(thread?.messages).toHaveLength(200);
     expect(thread?.messages[0]?.text).toBe("Keep this prompt");
     expect(thread?.messages.at(-1)?.text).toBe("Assistant update 249");
+    expect(thread?.messages[0]?.importIndex).toBe(0);
+    expect(thread?.messages[1]?.importIndex).toBe(52);
+    expect(thread?.messages.at(-1)?.importIndex).toBe(250);
   });
 });

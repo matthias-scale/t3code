@@ -124,6 +124,7 @@ const TranscriptRecord = Schema.Struct({
   cwd: Schema.optional(Schema.String),
   sessionId: Schema.optional(Schema.String),
   aiTitle: Schema.optional(Schema.String),
+  customTitle: Schema.optional(Schema.String),
   isSidechain: Schema.optional(Schema.Boolean),
   isMeta: Schema.optional(Schema.Boolean),
   isCompactSummary: Schema.optional(Schema.Boolean),
@@ -164,6 +165,7 @@ interface AgentSessionTranscriptMetadata {
 }
 
 export interface AgentSessionThreadMessage {
+  readonly importIndex: number;
   readonly role: "user" | "assistant";
   readonly text: string;
   readonly createdAt: string;
@@ -408,9 +410,11 @@ function parseAgentSessionRecords(
   // timestamp text, so only transcript metadata can provide a resumable ID.
   let providerSessionId = input.source === "codex" ? "" : input.fallbackSessionId;
   let title = input.canonicalTitle?.trim() || null;
+  let customTitle: string | null = null;
   let model: string | null = null;
   let hasCodexSessionId = false;
   const messages: Array<AgentSessionThreadMessage & { readonly codexResponseUser: boolean }> = [];
+  let nextImportIndex = 0;
   let firstUserMessage:
     | (AgentSessionThreadMessage & { readonly codexResponseUser: boolean })
     | undefined;
@@ -472,15 +476,19 @@ function parseAgentSessionRecords(
   }
 
   const retainMessage = (
-    message: AgentSessionThreadMessage & { readonly codexResponseUser: boolean },
+    message: Omit<AgentSessionThreadMessage, "importIndex"> & {
+      readonly codexResponseUser: boolean;
+    },
   ) => {
-    if (firstUserMessage === undefined && message.role === "user") {
-      firstUserMessage = message;
+    const indexedMessage = { ...message, importIndex: nextImportIndex };
+    nextImportIndex += 1;
+    if (firstUserMessage === undefined && indexedMessage.role === "user") {
+      firstUserMessage = indexedMessage;
     }
-    if (firstDerivedTitle === null && message.role === "user") {
-      firstDerivedTitle = deriveImportedThreadTitle(message.text, input.source);
+    if (firstDerivedTitle === null && indexedMessage.role === "user") {
+      firstDerivedTitle = deriveImportedThreadTitle(indexedMessage.text, input.source);
     }
-    messages.push(message);
+    messages.push(indexedMessage);
     if (messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
   };
 
@@ -512,6 +520,9 @@ function parseAgentSessionRecords(
         continue;
       }
       if (record.sessionId?.trim()) providerSessionId = record.sessionId.trim();
+      if (record.type === "custom-title" && record.customTitle?.trim()) {
+        customTitle = record.customTitle.trim();
+      }
       if (record.aiTitle?.trim()) title = record.aiTitle.trim();
       const messageModel = record.message?.model?.trim();
       // Claude uses this sentinel for local error responses. It is not a
@@ -604,7 +615,7 @@ function parseAgentSessionRecords(
     source: input.source,
     providerInstanceId: input.providerInstanceId,
     providerSessionId,
-    title: title ?? firstDerivedTitle ?? "Imported thread",
+    title: customTitle ?? title ?? firstDerivedTitle ?? "Imported thread",
     model,
     createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
     updatedAt: fallbackTimestamp,
@@ -628,6 +639,7 @@ function shouldRetainDecodedRecord(
       record.type === "assistant" ||
       record.sessionId !== undefined ||
       record.aiTitle !== undefined ||
+      record.customTitle !== undefined ||
       record.message?.model !== undefined
     );
   }
