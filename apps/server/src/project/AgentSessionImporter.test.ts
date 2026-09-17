@@ -1238,7 +1238,7 @@ const integrationLayer = Layer.mergeAll(
 );
 
 it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
-  it.effect("repins an untouched import when an additional Codex home becomes the winner", () =>
+  it.effect("repins an untouched import when the newest Codex home changes", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngine.OrchestrationEngineService;
       const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -1374,6 +1374,21 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       expect(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor).toEqual({
         threadId: sessionId,
         homePath: additionalHome,
+      });
+
+      transcriptRecords.push(
+        encodeTranscriptRecord({
+          timestamp: "2026-08-24T10:04:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Appended from the active home" },
+        }),
+      );
+      yield* fileSystem.writeFileString(activeTranscriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.utimes(activeTranscriptPath, nowMs / 1_000, nowMs / 1_000);
+
+      expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor).toEqual({
+        threadId: sessionId,
       });
     }),
   );

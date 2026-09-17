@@ -264,7 +264,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
     sessionHomePath: string | undefined,
     existingThread?: OrchestrationThread,
   ) {
-    if (source.provider !== "codex" || sessionHomePath === undefined) return;
+    if (source.provider !== "codex") return;
     const resolvedThread =
       existingThread === undefined
         ? yield* snapshots.getThreadDetailById(threadId)
@@ -284,7 +284,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
       Array.isArray(cursor) ||
       !("threadId" in cursor) ||
       cursor.threadId !== source.providerSessionId ||
-      ("homePath" in cursor && cursor.homePath === sessionHomePath)
+      ("homePath" in cursor ? cursor.homePath : undefined) === sessionHomePath
     ) {
       return;
     }
@@ -294,7 +294,10 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
         threadId,
         provider: current.provider,
         providerInstanceId: current.providerInstanceId,
-        resumeCursor: { threadId: source.providerSessionId, homePath: sessionHomePath },
+        resumeCursor: {
+          threadId: source.providerSessionId,
+          ...(sessionHomePath === undefined ? {} : { homePath: sessionHomePath }),
+        },
       },
       { onConflict: "updateStoppedMatchingSession" },
     );
