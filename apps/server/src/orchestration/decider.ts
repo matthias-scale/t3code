@@ -2060,6 +2060,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const existingMessageIds = new Set(thread.messages.map((message) => message.id));
       const appendedMessageIds = new Set<MessageId>();
       const events: Array<PlannedOrchestrationEvent> = [];
+      let newestAppendedMessageAt: string | null = null;
+      let newestAppendedMessageAtMs = Number.NEGATIVE_INFINITY;
       for (const message of command.messages) {
         if (
           !isImportedAgentSessionMessageId(message.messageId) ||
@@ -2072,6 +2074,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           });
         }
         appendedMessageIds.add(message.messageId);
+        const messageAtMs = Date.parse(message.createdAt);
+        if (messageAtMs > newestAppendedMessageAtMs) {
+          newestAppendedMessageAt = message.createdAt;
+          newestAppendedMessageAtMs = messageAtMs;
+        }
         events.push({
           ...(yield* withEventBase({
             aggregateKind: "thread",
@@ -2090,6 +2097,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             streaming: false,
             createdAt: message.createdAt,
             updatedAt: message.createdAt,
+          },
+        });
+      }
+      // A transcript backfill only counts as fresh activity when it crosses
+      // the thread's settle boundary. Older imports preserve its settlement.
+      if (
+        thread.settledOverride === "settled" &&
+        thread.settledAt !== null &&
+        newestAppendedMessageAt !== null &&
+        newestAppendedMessageAtMs > Date.parse(thread.settledAt)
+      ) {
+        events.unshift({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: newestAppendedMessageAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.unsettled",
+          payload: {
+            threadId: command.threadId,
+            reason: "activity",
+            updatedAt: newestAppendedMessageAt,
           },
         });
       }

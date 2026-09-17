@@ -661,13 +661,16 @@ describe("ThreadSettlementReactor", () => {
     ),
   );
 
-  it.effect("settles imported-only history after four hours of inactivity", () =>
+  it.effect("re-settles a woken imported thread after four hours of inactivity", () =>
     Effect.scoped(
       Effect.gen(function* () {
         yield* TestClock.setTime(Date.parse(NOW));
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
-            makeThread("import:codex:idle", {
+            makeThread("import:codex:woken-idle", {
+              settledOverride: null,
+              settledAt: null,
+              unsettledAt: "2026-08-28T07:00:00.000Z",
               latestUserMessageAt: null,
               latestImportedMessageAt: "2026-08-28T07:00:00.000Z",
               // Title sync is not activity and must not reset the import anchor.
@@ -690,8 +693,16 @@ describe("ThreadSettlementReactor", () => {
           const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
           yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
           assert.deepStrictEqual(
-            (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
-            [ThreadId.make("import:codex:idle")],
+            (yield* Ref.get(fixture.commands)).map((command) => ({
+              threadId: command.threadId,
+              settledAt: command.settledAt,
+            })),
+            [
+              {
+                threadId: ThreadId.make("import:codex:woken-idle"),
+                settledAt: "2026-08-28T07:00:00.000Z",
+              },
+            ],
           );
         }).pipe(Effect.provide(fixture.layer));
       }),
