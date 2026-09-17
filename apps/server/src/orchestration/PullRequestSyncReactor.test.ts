@@ -811,7 +811,7 @@ describe("PullRequestSyncReactor", () => {
                   thread,
                   pullRequest: null,
                   now: NOW,
-                  autoSettleAfterDays: null,
+                  autoSettleAfterHours: null,
                   autoSettleOnMerge: true,
                 }),
               );
