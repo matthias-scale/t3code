@@ -15,6 +15,91 @@ import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
 it.layer(NodeServices.layer)("thread history import", (it) => {
+  it.effect("allows imported title sync for only repairable manual titles", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("import:codex:manual-title");
+      const makeReadModel = (title: string) => ({
+        ...createEmptyReadModel("2026-08-24T10:00:00.000Z"),
+        threads: [
+          {
+            id: threadId,
+            projectId: ProjectId.make("project-1"),
+            title,
+            titleState: {
+              source: "manual" as const,
+              version: CommandId.make("manual-title"),
+              needsRefinement: false,
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            branch: null,
+            worktreePath: null,
+            pullRequests: [],
+            latestTurn: null,
+            createdAt: "2026-08-24T10:00:00.000Z",
+            updatedAt: "2026-08-24T10:00:00.000Z",
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            snoozedUntil: null,
+            snoozedAt: null,
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          },
+        ],
+      });
+      const decideSync = (
+        currentTitle: string,
+        title: string,
+        expectedTitle = currentTitle,
+        expectedVersion = CommandId.make("manual-title"),
+      ) =>
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.title.import.sync",
+            commandId: CommandId.make(`sync-${expectedTitle}`),
+            threadId,
+            expectedTitle,
+            expectedVersion,
+            title,
+          },
+          readModel: makeReadModel(currentTitle),
+        });
+
+      for (const [expectedTitle, title] of [
+        ["● Herdr ub2:t3:2 # AGENTS.md instructions", "● Herdr ub2:t3:2 Fixed title"],
+        ["<environment_context>", "Fixed title"],
+      ] as const) {
+        expect(yield* decideSync(expectedTitle, title)).toMatchObject({
+          type: "thread.meta-updated",
+          payload: { title },
+        });
+      }
+
+      const error = yield* Effect.flip(decideSync("Custom manual title", "Fixed title"));
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+
+      const markedTitle = "● Herdr ub2:t3:2 Existing title";
+      for (const race of [
+        decideSync(markedTitle, "● Herdr ub2:t3:2 Fixed title", "Stale title"),
+        decideSync(
+          markedTitle,
+          "● Herdr ub2:t3:2 Fixed title",
+          markedTitle,
+          CommandId.make("stale-version"),
+        ),
+        decideSync(markedTitle, "Fixed title"),
+      ]) {
+        expect((yield* Effect.flip(race))._tag).toBe("OrchestrationCommandInvariantError");
+      }
+    }),
+  );
+
   it.effect("marks imported thread creation without changing live creation", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:00:00.000Z";

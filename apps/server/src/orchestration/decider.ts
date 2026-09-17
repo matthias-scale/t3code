@@ -44,6 +44,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { manualImportedTitleSyncPolicy } from "./ImportedTitleSyncPolicy.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -2101,9 +2102,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const manualPolicy =
+        thread.titleState?.source === "manual"
+          ? manualImportedTitleSyncPolicy(thread.title)
+          : undefined;
       if (
         hasNativeImportedThreadActivity(thread) ||
-        thread.titleState?.source === "manual" ||
+        manualPolicy === null ||
+        (manualPolicy !== undefined && !command.title.startsWith(manualPolicy.prefix)) ||
         thread.title !== command.expectedTitle ||
         (thread.titleState?.version ?? null) !== command.expectedVersion
       ) {

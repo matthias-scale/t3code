@@ -27,6 +27,10 @@ import * as Stream from "effect/Stream";
 
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import {
+  hasLegacyCodexContextTitle,
+  manualImportedTitleSyncPolicy,
+} from "../orchestration/ImportedTitleSyncPolicy.ts";
 import * as ProviderSessionDirectory from "../provider/Services/ProviderSessionDirectory.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -77,16 +81,6 @@ function hasNativeActivity(thread: OrchestrationThread): boolean {
     thread.session !== null ||
     thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id)) ||
     thread.proposedPlans.length > 0
-  );
-}
-
-/** Identify titles produced by the old first-line Codex import fallback. */
-function hasLegacyCodexContextTitle(title: string): boolean {
-  return (
-    title === "<recommended_plugins>" ||
-    title === "<environment_context>" ||
-    title === "<user_instructions>" ||
-    /^# AGENTS\.md instructions(?:\s|$)/.test(title)
   );
 }
 
@@ -239,16 +233,19 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
         : Option.some(existingThread);
     if (Option.isNone(resolvedThread) || hasNativeActivity(resolvedThread.value)) return;
     const existingTitle = resolvedThread.value.title;
-    const replacementTitle =
+    const manualPolicy =
+      resolvedThread.value.titleState?.source === "manual"
+        ? manualImportedTitleSyncPolicy(existingTitle)
+        : undefined;
+    if (manualPolicy === null) return;
+    const replacementTitleBody =
       providerTitle ??
-      (hasLegacyCodexContextTitle(existingTitle)
+      (hasLegacyCodexContextTitle(manualPolicy?.titleForFallback ?? existingTitle)
         ? deriveImportedCodexTitle(resolvedThread.value)
         : null);
-    if (
-      replacementTitle === null ||
-      resolvedThread.value.titleState?.source === "manual" ||
-      existingTitle === replacementTitle
-    ) {
+    const replacementTitle =
+      replacementTitleBody === null ? null : `${manualPolicy?.prefix ?? ""}${replacementTitleBody}`;
+    if (replacementTitle === null || existingTitle === replacementTitle) {
       return;
     }
     yield* engine.dispatch({

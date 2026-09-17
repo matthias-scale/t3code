@@ -328,7 +328,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
-    it.effect("repairs legacy context titles on already imported Codex threads", () =>
+    it.effect("repairs eligible manual titles on already imported Codex threads", () =>
       Effect.gen(function* () {
         const thread = makeThread("codex");
         const source = makeThreadOutcome(thread).source;
@@ -374,6 +374,11 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
                 ? Option.some({
                     ...makeProjectedThread({ source: "codex", imported: true }),
                     title: "<recommended_plugins>",
+                    titleState: {
+                      source: "manual",
+                      version: CommandId.make("manual-placeholder-title"),
+                      needsRefinement: false,
+                    },
                   })
                 : Option.none(),
           }),
@@ -386,9 +391,44 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             threadId,
             title: "Prototype MetaApi trade replication",
             expectedTitle: "<recommended_plugins>",
-            expectedVersion: null,
+            expectedVersion: "manual-placeholder-title",
           },
         ]);
+
+        commands.length = 0;
+        const marker = "● Herdr ub2:t3:2 ";
+        expect(
+          yield* runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                Option.some({
+                  ...makeProjectedThread({ source: "codex", imported: true }),
+                  title: `${marker}# AGENTS.md instructions for /tmp/project`,
+                  titleState: {
+                    source: "manual",
+                    version: CommandId.make("manual-marker-title"),
+                    needsRefinement: false,
+                  },
+                }),
+            }),
+          }),
+        ).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(commands).toMatchObject([
+          {
+            type: "thread.title.import.sync",
+            expectedTitle: `${marker}# AGENTS.md instructions for /tmp/project`,
+            expectedVersion: "manual-marker-title",
+            title: `${marker}Prototype MetaApi trade replication`,
+          },
+        ]);
+        const syncedTitle =
+          commands[0]?.type === "thread.title.import.sync" ? commands[0].title : "";
+        const wanted = marker + syncedTitle.replace(/^● Herdr \S+ /, "");
+        expect(wanted).toBe(syncedTitle);
 
         commands.length = 0;
         expect(
@@ -820,6 +860,11 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
                 Option.some({
                   ...projected,
                   title: "<user_instructions>",
+                  titleState: {
+                    source: "manual",
+                    version: CommandId.make("manual-derived-placeholder-title"),
+                    needsRefinement: false,
+                  },
                   messages: [
                     {
                       ...projected.messages[0]!,
@@ -841,6 +886,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
               type: "thread.title.import.sync",
               threadId,
               expectedTitle: "<user_instructions>",
+              expectedVersion: "manual-derived-placeholder-title",
               title: "Recovered from imported history",
             },
           ]);
