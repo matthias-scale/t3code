@@ -1,4 +1,4 @@
-import { AutoSettleDaysField } from "./components/AutoSettleDaysField";
+import { AutoSettleHoursField } from "./components/AutoSettleHoursField";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
@@ -58,7 +58,11 @@ import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { resolveAgentAwarenessPlatformPresentation } from "./SettingsRouteScreen.logic";
-import { planAutoSettleSettingsSync, type AutoSettleSettings } from "./autoSettleSettingsSync";
+import {
+  planAutoSettleSettingsSync,
+  planAutoSettleSettingsWrites,
+  type AutoSettleSettings,
+} from "./autoSettleSettingsSync";
 
 type NotificationStatus = "checking" | "enabled" | "disabled" | "unsupported";
 type LiveActivityStatus = "checking" | "enabled" | "disabled" | "signed-out" | "linking";
@@ -611,7 +615,7 @@ function GeneralSettingsSection() {
   );
 }
 
-const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterDays ?? 3;
+const AUTO_SETTLE_DEFAULT_HOURS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterHours ?? 12;
 
 /**
  * Mobile edits auto-settle defaults across connected, capable environments.
@@ -637,8 +641,14 @@ function AutoSettleSettingsRows() {
   const writeToAll = (patch: Partial<AutoSettleSettings>) => {
     setPendingWrites((count) => count + 1);
     void Promise.allSettled(
-      syncTargets.map((environment) =>
-        updateSettings({ environmentId: environment.environmentId, input: { patch } }),
+      planAutoSettleSettingsWrites(
+        patch,
+        syncTargets.map((environment) => ({
+          environmentId: environment.environmentId,
+          capabilities: environment.serverConfig?.environment.capabilities,
+        })),
+      ).map((write) =>
+        updateSettings({ environmentId: write.environmentId, input: { patch: write.patch } }),
       ),
     ).finally(() => setPendingWrites((count) => count - 1));
   };
@@ -652,7 +662,7 @@ function AutoSettleSettingsRows() {
     })),
   );
 
-  const afterDays = referenceSettings.sidebarAutoSettleAfterDays;
+  const afterHours = referenceSettings.sidebarAutoSettleAfterHours;
 
   return (
     <>
@@ -665,12 +675,12 @@ function AutoSettleSettingsRows() {
       <SettingsSwitchRow
         icon="clock"
         label="Auto-settle inactive threads"
-        value={afterDays !== null}
+        value={afterHours !== null}
         onValueChange={(value) =>
-          writeToAll({ sidebarAutoSettleAfterDays: value ? AUTO_SETTLE_DEFAULT_DAYS : null })
+          writeToAll({ sidebarAutoSettleAfterHours: value ? AUTO_SETTLE_DEFAULT_HOURS : null })
         }
       />
-      {afterDays !== null ? (
+      {afterHours !== null ? (
         <View
           className={cn(
             "flex-row items-center gap-4 px-4",
@@ -684,11 +694,11 @@ function AutoSettleSettingsRows() {
               Platform.OS === "android" ? "text-base" : "text-lg",
             )}
           >
-            Inactive days
+            Inactive hours
           </Text>
-          <AutoSettleDaysField
-            value={afterDays}
-            onValueChange={(value) => writeToAll({ sidebarAutoSettleAfterDays: value })}
+          <AutoSettleHoursField
+            value={afterHours}
+            onValueChange={(value) => writeToAll({ sidebarAutoSettleAfterHours: value })}
           />
         </View>
       ) : null}

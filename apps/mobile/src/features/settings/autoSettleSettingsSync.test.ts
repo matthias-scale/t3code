@@ -1,13 +1,13 @@
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { planAutoSettleSettingsSync } from "./autoSettleSettingsSync";
+import { planAutoSettleSettingsSync, planAutoSettleSettingsWrites } from "./autoSettleSettingsSync";
 
 const reference = {
   environmentId: EnvironmentId.make("reference"),
   settings: {
     ...DEFAULT_SERVER_SETTINGS,
-    sidebarAutoSettleAfterDays: 7,
+    sidebarAutoSettleAfterHours: 7,
     sidebarAutoSettleOnMerge: true,
     newWorktreesStartFromOrigin: false,
     continueThreadsAfterServerUpdate: false,
@@ -15,6 +15,32 @@ const reference = {
 };
 
 describe("auto-settle settings sync", () => {
+  it("writes legacy days and current hours per target", () => {
+    const legacyId = EnvironmentId.make("legacy");
+    const currentId = EnvironmentId.make("current");
+
+    expect(
+      planAutoSettleSettingsWrites({ sidebarAutoSettleAfterHours: 25 }, [
+        { environmentId: legacyId, capabilities: {} },
+        {
+          environmentId: currentId,
+          capabilities: { threadAutoSettlementHours: true },
+        },
+      ]),
+    ).toEqual([
+      { environmentId: legacyId, patch: { sidebarAutoSettleAfterDays: 2 } },
+      { environmentId: currentId, patch: { sidebarAutoSettleAfterHours: 25 } },
+    ]);
+  });
+
+  it("preserves a disabled inactivity threshold for legacy targets", () => {
+    expect(
+      planAutoSettleSettingsWrites({ sidebarAutoSettleAfterHours: null }, [
+        { environmentId: EnvironmentId.make("legacy") },
+      ])[0]?.patch,
+    ).toEqual({ sidebarAutoSettleAfterDays: null });
+  });
+
   it("ignores differences in independently configured environment settings", () => {
     const target = {
       environmentId: EnvironmentId.make("remote"),
@@ -34,7 +60,7 @@ describe("auto-settle settings sync", () => {
 
     expect(plan.mismatches).toEqual([]);
     expect(plan.patch).toEqual({
-      sidebarAutoSettleAfterDays: 7,
+      sidebarAutoSettleAfterHours: 7,
       sidebarAutoSettleOnMerge: true,
     });
   });
@@ -45,7 +71,7 @@ describe("auto-settle settings sync", () => {
       label: "Remote",
       settings: {
         ...reference.settings,
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
         newWorktreesStartFromOrigin: true,
         continueThreadsAfterServerUpdate: true,
@@ -60,7 +86,7 @@ describe("auto-settle settings sync", () => {
     const updated = { ...target.settings, ...plan.patch };
 
     expect(plan.mismatches).toEqual([target]);
-    expect(updated.sidebarAutoSettleAfterDays).toBe(7);
+    expect(updated.sidebarAutoSettleAfterHours).toBe(7);
     expect(updated.sidebarAutoSettleOnMerge).toBe(true);
     expect(updated.newWorktreesStartFromOrigin).toBe(true);
     expect(updated.continueThreadsAfterServerUpdate).toBe(true);

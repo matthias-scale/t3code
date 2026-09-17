@@ -75,16 +75,24 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
-export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
-export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
-export const SidebarAutoSettleAfterDays = Schema.Number.check(
+export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_HOURS = 1;
+export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_HOURS = 2160;
+export const SidebarAutoSettleAfterHours = Schema.Number.check(
   Schema.isBetween({
-    minimum: MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-    maximum: MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+    minimum: MIN_SIDEBAR_AUTO_SETTLE_AFTER_HOURS,
+    maximum: MAX_SIDEBAR_AUTO_SETTLE_AFTER_HOURS,
   }),
 );
-export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
-const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 3;
+export type SidebarAutoSettleAfterHours = typeof SidebarAutoSettleAfterHours.Type;
+
+/** Keep legacy clients from settling earlier than the configured hour threshold. */
+export const legacySidebarAutoSettleAfterDays = (
+  hours: SidebarAutoSettleAfterHours | null,
+): number | null => (hours === null ? null : Math.max(1, Math.ceil(hours / 24)));
+const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_HOURS: SidebarAutoSettleAfterHours = 12;
+const LegacySidebarAutoSettleAfterDays = Schema.Number.check(
+  Schema.isBetween({ minimum: 1, maximum: 90 }),
+);
 export const MIN_GLASS_OPACITY = 40;
 export const MAX_GLASS_OPACITY = 100;
 export const GlassOpacity = Schema.Int.check(
@@ -1002,7 +1010,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sourceControlWritingStyle",
   "pullRequestMergeMethod",
   "sidebarAutoSettleOnMerge",
-  "sidebarAutoSettleAfterDays",
+  "sidebarAutoSettleAfterHours",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
 ] as const;
@@ -1013,7 +1021,7 @@ export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTIN
  * `null` is a real value where the environment type is nullable (no default
  * model, no dedicated writer model, never auto-settle).
  */
-export const ProjectSettingsOverrides = Schema.Struct({
+const ProjectSettingsOverridesCurrent = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(WorktreeCleanup),
   defaultModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   defaultRuntimeMode: Schema.optionalKey(RuntimeMode),
@@ -1028,10 +1036,44 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sourceControlWritingStyle: Schema.optionalKey(SourceControlWritingStyleSettings),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
 } satisfies Record<ProjectScopedServerSettingKey, unknown>);
+const ProjectSettingsOverridesEncoded = Schema.Struct({
+  ...ProjectSettingsOverridesCurrent.fields,
+  sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
+});
+const ProjectSettingsOverridesPatch = Schema.Struct({
+  ...ProjectSettingsOverridesCurrent.fields,
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
+});
+export const ProjectSettingsOverrides = ProjectSettingsOverridesEncoded.pipe(
+  Schema.decodeTo(
+    Schema.toType(ProjectSettingsOverridesCurrent),
+    SchemaTransformation.transform({
+      decode: ({ sidebarAutoSettleAfterDays, ...settings }) =>
+        settings.sidebarAutoSettleAfterHours !== undefined ||
+        sidebarAutoSettleAfterDays === undefined
+          ? settings
+          : {
+              ...settings,
+              sidebarAutoSettleAfterHours:
+                sidebarAutoSettleAfterDays === null ? null : sidebarAutoSettleAfterDays * 24,
+            },
+      encode: (settings) => {
+        const hours = settings.sidebarAutoSettleAfterHours;
+        return hours === undefined
+          ? settings
+          : {
+              ...settings,
+              sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
+            };
+      },
+    }),
+  ),
+);
 export type ProjectSettingsOverrides = typeof ProjectSettingsOverrides.Type;
 
 export const StorageCleanupSettings = Schema.Struct({
@@ -1046,7 +1088,7 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
-export const ServerSettings = Schema.Struct({
+const ServerSettingsCurrent = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(
@@ -1128,8 +1170,8 @@ export const ServerSettings = Schema.Struct({
   /** Whether the server-local Device panel setup flow has been completed. */
   deviceOnboardingCompleted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   deviceHosts: SshDeviceHostConfigs.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
+  sidebarAutoSettleAfterHours: Schema.NullOr(SidebarAutoSettleAfterHours).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_HOURS)),
   ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
@@ -1176,6 +1218,9 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
   addProjectBaseDirectory: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  codexAdditionalSessionHomes: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   textGenerationModelSelection: ModelSelection.pipe(
     Schema.withDecodingDefault(
       Effect.succeed({
@@ -1237,6 +1282,57 @@ export const ServerSettings = Schema.Struct({
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+});
+const ServerSettingsEncoded = Schema.Struct({
+  ...ServerSettingsCurrent.fields,
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
+});
+const ServerSettingsWire = Schema.toEncoded(ServerSettingsEncoded);
+const CurrentServerSettingsEncoded = Schema.toEncoded(ServerSettingsCurrent);
+const decodeServerSettingsWire = Schema.decodeUnknownEffect(ServerSettingsWire);
+const decodeCurrentServerSettingsEncoded = Schema.decodeUnknownEffect(CurrentServerSettingsEncoded);
+
+function migrateServerSettingsEncoded(settings: Readonly<Record<string, unknown>>) {
+  const { sidebarAutoSettleAfterDays, ...current } = settings;
+  if (
+    current.sidebarAutoSettleAfterHours !== undefined ||
+    sidebarAutoSettleAfterDays === undefined
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    sidebarAutoSettleAfterHours:
+      sidebarAutoSettleAfterDays === null || typeof sidebarAutoSettleAfterDays !== "number"
+        ? sidebarAutoSettleAfterDays
+        : sidebarAutoSettleAfterDays * 24,
+  };
+}
+
+const ServerSettingsCodec = ServerSettingsWire.pipe(
+  Schema.decodeTo(
+    ServerSettingsCurrent,
+    SchemaTransformation.transformOrFail({
+      decode: (settings) =>
+        decodeCurrentServerSettingsEncoded(migrateServerSettingsEncoded(settings)).pipe(
+          Effect.mapError((error) => error.issue),
+        ),
+      encode: (settings) => {
+        const hours = settings.sidebarAutoSettleAfterHours;
+        return decodeServerSettingsWire(
+          hours === undefined
+            ? settings
+            : {
+                ...settings,
+                sidebarAutoSettleAfterDays: legacySidebarAutoSettleAfterDays(hours),
+              },
+        ).pipe(Effect.mapError((error) => error.issue));
+      },
+    }),
+  ),
+);
+export const ServerSettings = Object.assign(ServerSettingsCodec, {
+  fields: ServerSettingsCurrent.fields,
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -1444,13 +1540,14 @@ export const ServerSettingsPatch = Schema.Struct({
    * current entry from the last settings snapshot.
    */
   projectSettingsOverrides: Schema.optionalKey(
-    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
+    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverridesPatch)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
-  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
+  sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
@@ -1467,6 +1564,7 @@ export const ServerSettingsPatch = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   newWorktreesStartFromOrigin: Schema.optionalKey(Schema.Boolean),
   addProjectBaseDirectory: Schema.optionalKey(TrimmedString),
+  codexAdditionalSessionHomes: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   sourceControlWritingStyle: Schema.optionalKey(
     Schema.Struct({

@@ -20,7 +20,6 @@ import {
   normalizeThreadPullRequestKey,
   threadPullRequestKeysEqual,
 } from "@t3tools/shared/threadPullRequests";
-import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -45,6 +44,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { manualImportedTitleSyncPolicy } from "./ImportedTitleSyncPolicy.ts";
 import { threadHasQueuedTurnStart } from "./ThreadSettlementPolicy.ts";
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -104,6 +104,17 @@ function openRequests(thread: Pick<OrchestrationThread, "activities">) {
     }
   }
   return requests;
+}
+
+function hasNativeImportedThreadActivity(
+  thread: Pick<OrchestrationThread, "messages" | "latestTurn" | "session" | "proposedPlans">,
+): boolean {
+  return (
+    thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id)) ||
+    thread.latestTurn !== null ||
+    thread.session !== null ||
+    thread.proposedPlans.length > 0
+  );
 }
 
 /** Apply the shared shell-level rule to the detailed command read model. */
@@ -2030,27 +2041,133 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      const settledAt = command.messages.reduce(
-        (latest, message) =>
-          compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
-        firstMessage.createdAt,
-      );
-      events.push({
+      return events;
+    }
+
+    case "thread.history.append": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (hasNativeImportedThreadActivity(thread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' has native activity and cannot receive imported history.`,
+        });
+      }
+
+      const existingMessageIds = new Set(thread.messages.map((message) => message.id));
+      const appendedMessageIds = new Set<MessageId>();
+      const events: Array<PlannedOrchestrationEvent> = [];
+      let newestAppendedMessageAt: string | null = null;
+      let newestAppendedMessageAtMs = Number.NEGATIVE_INFINITY;
+      for (const message of command.messages) {
+        if (
+          !isImportedAgentSessionMessageId(message.messageId) ||
+          existingMessageIds.has(message.messageId) ||
+          appendedMessageIds.has(message.messageId)
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Message id '${message.messageId}' is not a new imported-session message id.`,
+          });
+        }
+        appendedMessageIds.add(message.messageId);
+        const messageAtMs = Date.parse(message.createdAt);
+        if (messageAtMs > newestAppendedMessageAtMs) {
+          newestAppendedMessageAt = message.createdAt;
+          newestAppendedMessageAtMs = messageAtMs;
+        }
+        events.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: message.createdAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.createdAt,
+          },
+        });
+      }
+      // A transcript backfill only counts as fresh activity when it crosses
+      // the thread's settle boundary. Older imports preserve its settlement.
+      if (
+        thread.settledOverride === "settled" &&
+        thread.settledAt !== null &&
+        newestAppendedMessageAt !== null &&
+        newestAppendedMessageAtMs > Date.parse(thread.settledAt)
+      ) {
+        events.unshift({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: newestAppendedMessageAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.unsettled",
+          payload: {
+            threadId: command.threadId,
+            reason: "activity",
+            updatedAt: newestAppendedMessageAt,
+          },
+        });
+      }
+      return events;
+    }
+
+    case "thread.title.import.sync": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const manualPolicy =
+        thread.titleState?.source === "manual"
+          ? manualImportedTitleSyncPolicy(thread.title)
+          : undefined;
+      if (
+        hasNativeImportedThreadActivity(thread) ||
+        manualPolicy === null ||
+        (manualPolicy !== undefined && !command.title.startsWith(manualPolicy.prefix)) ||
+        thread.title !== command.expectedTitle ||
+        (thread.titleState?.version ?? null) !== command.expectedVersion
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' changed before its imported title could be synced.`,
+        });
+      }
+      return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
-          occurredAt: settledAt,
+          occurredAt: yield* nowIso,
           commandId: command.commandId,
           metadata: { historyImport: true },
         })),
-        type: "thread.settled",
+        type: "thread.meta-updated",
         payload: {
           threadId: command.threadId,
-          settledAt,
-          updatedAt: settledAt,
+          title: command.title,
+          titleState: {
+            source: manualPolicy?.prefix ? "manual" : "generated",
+            version: command.commandId,
+            needsRefinement: false,
+          },
+          updatedAt: thread.updatedAt,
         },
-      });
-      return events;
+      };
     }
 
     case "thread.proposed-plan.upsert": {

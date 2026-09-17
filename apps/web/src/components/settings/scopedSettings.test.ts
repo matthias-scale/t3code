@@ -29,6 +29,7 @@ function environment(
     loaded?: boolean;
     settings?: Partial<ServerSettings>;
     projectOverrides?: boolean;
+    settlementHours?: boolean;
   } = {},
 ) {
   return {
@@ -43,7 +44,10 @@ function environment(
         : {
             settings: { ...DEFAULT_SERVER_SETTINGS, ...options.settings },
             environment: {
-              capabilities: { projectSettingsOverrides: options.projectOverrides !== false },
+              capabilities: {
+                projectSettingsOverrides: options.projectOverrides !== false,
+                ...(options.settlementHours === false ? {} : { threadAutoSettlementHours: true }),
+              },
             },
           },
   };
@@ -148,6 +152,55 @@ describe("scoped settings targets", () => {
 });
 
 describe("scoped settings writes", () => {
+  it("writes days to legacy environments and hours to current environments", () => {
+    const legacy = environment("Legacy", { settlementHours: false });
+    const current = environment("Current");
+    const scope = resolveSettingsScope({}, [], [legacy, current]);
+
+    expect(
+      planScopedSettingsPatch(scope, [legacy, current], {
+        sidebarAutoSettleAfterHours: 25,
+      }).serverWrites.map(({ environmentId, patch }) => ({ environmentId, patch })),
+    ).toEqual([
+      {
+        environmentId: legacy.environmentId,
+        patch: { sidebarAutoSettleAfterDays: 2 },
+      },
+      {
+        environmentId: current.environmentId,
+        patch: { sidebarAutoSettleAfterHours: 25 },
+      },
+    ]);
+  });
+
+  it("adapts auto-settle project overrides for each environment", () => {
+    const legacy = environment("Laptop", { settlementHours: false });
+    const plan = planScopedSettingsPatch(project, [legacy, server], {
+      sidebarAutoSettleAfterHours: 25,
+    });
+
+    expect(plan.serverWrites.map(({ environmentId, patch }) => ({ environmentId, patch }))).toEqual(
+      [
+        {
+          environmentId: server.environmentId,
+          patch: {
+            projectSettingsOverrides: {
+              [projectId]: { sidebarAutoSettleAfterHours: 25 },
+            },
+          },
+        },
+        {
+          environmentId: legacy.environmentId,
+          patch: {
+            projectSettingsOverrides: {
+              [laptopProjectId]: { sidebarAutoSettleAfterDays: 2 },
+            },
+          },
+        },
+      ],
+    );
+  });
+
   it("edits the effective machine policy without changing other machines' rules", () => {
     const custom = environment("Laptop", {
       settings: {

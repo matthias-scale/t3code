@@ -10,6 +10,7 @@ import {
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import { adaptServerSettingsPatchForCapabilities } from "@t3tools/client-runtime/state/shared-settings";
 import {
   clearProjectSettingsOverrides,
   resolveProjectSettings,
@@ -29,7 +30,10 @@ interface ScopedSettingsEnvironment {
   readonly serverConfig: {
     readonly settings: ServerSettings;
     readonly environment?: {
-      readonly capabilities: { readonly projectSettingsOverrides?: boolean | undefined };
+      readonly capabilities: {
+        readonly projectSettingsOverrides?: boolean | undefined;
+        readonly threadAutoSettlementHours?: boolean | undefined;
+      };
     };
   } | null;
 }
@@ -211,7 +215,7 @@ export function planScopedSettingsPatch(
   const unscopableKeys = isProjectScope
     ? serverKeys.filter((key) => !isProjectScopedSettingKey(key))
     : [];
-  const serverWrites: ScopedServerWrite[] =
+  const rawServerWrites: ScopedServerWrite[] =
     serverKeys.length === 0
       ? []
       : isProjectScope
@@ -265,6 +269,19 @@ export function planScopedSettingsPatch(
                   : serverPatch,
             }))
           : [];
+  const capabilitiesByEnvironmentId = new Map(
+    environments.map((environment) => [
+      environment.environmentId,
+      environment.serverConfig?.environment?.capabilities,
+    ]),
+  );
+  const serverWrites = rawServerWrites.map((write) => ({
+    ...write,
+    patch: adaptServerSettingsPatchForCapabilities(
+      write.patch,
+      capabilitiesByEnvironmentId.get(write.environmentId),
+    ),
+  }));
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
   const unavailableReason =

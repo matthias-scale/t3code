@@ -42,7 +42,7 @@ export type ProviderSessionDirectoryWriteError =
   | ProviderSessionDirectoryPersistenceError;
 
 export interface ProviderSessionDirectoryUpsertOptions {
-  readonly onConflict?: "update" | "ignore";
+  readonly onConflict?: "update" | "ignore" | "updateStoppedMatchingSession";
 }
 
 export interface ProviderSessionDirectoryShape {

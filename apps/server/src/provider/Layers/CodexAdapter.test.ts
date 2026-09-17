@@ -319,6 +319,23 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("uses the home recorded on an imported session cursor", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const homePath = "/tmp/imported-codex-home";
+
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("import:codex:from-extra-home"),
+        resumeCursor: { threadId: "from-extra-home", homePath },
+        runtimeMode: "full-access",
+      });
+
+      NodeAssert.equal(sessionRuntimeFactory.lastRuntime?.options.homePath, homePath);
+      NodeAssert.equal(sessionRuntimeFactory.lastRuntime?.options.resumeHomePath, homePath);
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;

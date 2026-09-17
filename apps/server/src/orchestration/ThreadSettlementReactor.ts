@@ -41,13 +41,14 @@ export class ThreadSettlementReactor extends Context.Service<
 /** @public Service construction is part of the canonical Effect module API. */
 /** Whether any environment default or project override can settle a thread. */
 function autoSettlementConfigured(settings: ServerSettingsValue): boolean {
-  if (settings.sidebarAutoSettleOnMerge || settings.sidebarAutoSettleAfterDays !== null) {
+  if (settings.sidebarAutoSettleOnMerge || settings.sidebarAutoSettleAfterHours !== null) {
     return true;
   }
   return Object.values(settings.projectSettingsOverrides).some(
     (entry) =>
       entry.sidebarAutoSettleOnMerge === true ||
-      (entry.sidebarAutoSettleAfterDays !== undefined && entry.sidebarAutoSettleAfterDays !== null),
+      (entry.sidebarAutoSettleAfterHours !== undefined &&
+        entry.sidebarAutoSettleAfterHours !== null),
   );
 }
 
@@ -56,7 +57,7 @@ function autoSettlementConfigured(settings: ServerSettingsValue): boolean {
 export function autoSettlementSettingsKey(settings: ServerSettingsValue): string {
   return JSON.stringify([
     settings.sidebarAutoSettleOnMerge,
-    settings.sidebarAutoSettleAfterDays,
+    settings.sidebarAutoSettleAfterHours,
     // Only entries that touch settlement, in a stable order, so a project
     // override on an unrelated key does not queue a sweep. JSON drops
     // undefined, so inherit (absent) and never (null) need distinct marks.
@@ -64,15 +65,15 @@ export function autoSettlementSettingsKey(settings: ServerSettingsValue): string
       .filter(
         ([, entry]) =>
           entry.sidebarAutoSettleOnMerge !== undefined ||
-          entry.sidebarAutoSettleAfterDays !== undefined,
+          entry.sidebarAutoSettleAfterHours !== undefined,
       )
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([projectId, entry]) => [
         projectId,
         entry.sidebarAutoSettleOnMerge ?? "inherit",
-        entry.sidebarAutoSettleAfterDays === undefined
+        entry.sidebarAutoSettleAfterHours === undefined
           ? "inherit"
-          : entry.sidebarAutoSettleAfterDays,
+          : entry.sidebarAutoSettleAfterHours,
       ]),
   ]);
 }
@@ -119,7 +120,7 @@ export const make = Effect.gen(function* () {
           thread,
           pullRequest,
           now: decisionNow,
-          autoSettleAfterDays: settings.sidebarAutoSettleAfterDays,
+          autoSettleAfterHours: settings.sidebarAutoSettleAfterHours,
           autoSettleOnMerge: settings.sidebarAutoSettleOnMerge,
         });
         if (settledAt === null) {

@@ -24,6 +24,23 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("normalizes legacy auto-settle day patches to current hours", () => {
+    const projectId = ProjectId.make("legacy-settlement");
+    const next = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      sidebarAutoSettleAfterDays: 2,
+      projectSettingsOverrides: {
+        [projectId]: { sidebarAutoSettleAfterDays: 3 },
+      },
+    });
+
+    expect(next.sidebarAutoSettleAfterHours).toBe(48);
+    expect(next.projectSettingsOverrides[projectId]?.sidebarAutoSettleAfterHours).toBe(72);
+    expect(next).not.toHaveProperty("sidebarAutoSettleAfterDays");
+    expect(next.projectSettingsOverrides[projectId]).not.toHaveProperty(
+      "sidebarAutoSettleAfterDays",
+    );
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },

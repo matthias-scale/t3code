@@ -81,6 +81,7 @@ function configuredMcpToolAvailability(
 
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
+  homePath: Schema.optionalKey(Schema.String),
 });
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
@@ -171,6 +172,8 @@ export interface CodexSessionRuntimeOptions {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
   readonly homePath?: string;
+  /** Home pinned by an imported session. Kept in its resume cursor across turns. */
+  readonly resumeHomePath?: string;
   readonly launchArgs?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly cwd: string;
@@ -504,6 +507,10 @@ function readResumeCursorThreadId(
   resumeCursor: ProviderSession["resumeCursor"],
 ): string | undefined {
   return isCodexResumeCursorSchema(resumeCursor) ? resumeCursor.threadId : undefined;
+}
+
+function makeResumeCursor(threadId: string, homePath?: string): CodexResumeCursor {
+  return { threadId, ...(homePath === undefined ? {} : { homePath }) };
 }
 
 function runtimeModeToThreadConfig(input: RuntimeMode): {
@@ -1997,7 +2004,7 @@ export const makeCodexSessionRuntime = (
             return Effect.void;
           }
           return updateSession(sessionRef, {
-            resumeCursor: { threadId: payload.thread.id },
+            resumeCursor: makeResumeCursor(payload.thread.id, options.resumeHomePath),
           });
         }),
       ),
@@ -2389,7 +2396,7 @@ export const makeCodexSessionRuntime = (
         status: "ready",
         cwd: opened.cwd,
         model: opened.model,
-        resumeCursor: { threadId: providerThreadId },
+        resumeCursor: makeResumeCursor(providerThreadId, options.resumeHomePath),
         updatedAt: yield* nowIso,
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
@@ -2491,7 +2498,7 @@ export const makeCodexSessionRuntime = (
             threadId: options.threadId,
             turnId,
             ...(resumedProviderThreadId
-              ? { resumeCursor: { threadId: resumedProviderThreadId } }
+              ? { resumeCursor: makeResumeCursor(resumedProviderThreadId, options.resumeHomePath) }
               : {}),
           } satisfies ProviderTurnStartResult;
         }),

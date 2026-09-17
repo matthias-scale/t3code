@@ -259,11 +259,49 @@ function translateLegacyProjectOverridePatch(
   } as ServerSettingsPatch;
 }
 
+/** Normalize the legacy day-based patch contract before merging current settings. */
+function translateLegacyAutoSettlePatch(patch: ServerSettingsPatch): ServerSettingsPatch {
+  const { sidebarAutoSettleAfterDays, projectSettingsOverrides, ...rest } = patch;
+  const normalizedProjectSettingsOverrides =
+    projectSettingsOverrides === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(projectSettingsOverrides).map(([projectId, entry]) => {
+            if (entry === null) return [projectId, entry];
+            const { sidebarAutoSettleAfterDays: afterDays, ...current } = entry;
+            return [
+              projectId,
+              current.sidebarAutoSettleAfterHours !== undefined || afterDays === undefined
+                ? current
+                : {
+                    ...current,
+                    sidebarAutoSettleAfterHours: afterDays === null ? null : afterDays * 24,
+                  },
+            ];
+          }),
+        );
+  return {
+    ...rest,
+    ...(rest.sidebarAutoSettleAfterHours !== undefined || sidebarAutoSettleAfterDays === undefined
+      ? {}
+      : {
+          sidebarAutoSettleAfterHours:
+            sidebarAutoSettleAfterDays === null ? null : sidebarAutoSettleAfterDays * 24,
+        }),
+    ...(normalizedProjectSettingsOverrides === undefined
+      ? {}
+      : { projectSettingsOverrides: normalizedProjectSettingsOverrides }),
+  };
+}
+
 export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
 ): ServerSettings {
-  const patch = translateLegacyProjectOverridePatch(current, rawPatch);
+  const patch = translateLegacyProjectOverridePatch(
+    current,
+    translateLegacyAutoSettlePatch(rawPatch),
+  );
   const selectionPatch = patch.textGenerationModelSelection;
   const {
     automaticGitFetchInterval,
