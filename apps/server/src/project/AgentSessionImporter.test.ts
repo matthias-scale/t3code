@@ -1150,7 +1150,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       expect(Option.getOrThrow(importedThread).messages.map((message) => message.text)).toEqual(
         integrationThread.messages.map((message) => message.text),
       );
-      expect(Option.getOrThrow(importedThread).settledOverride).toBe("settled");
+      expect(Option.getOrThrow(importedThread).settledOverride).toBeNull();
       expect(Option.getOrThrow(importedThread).updatedAt).toBe("2026-08-24T10:00:00.000Z");
       expect(Option.getOrThrow(binding)).toMatchObject({
         provider: "codex",
@@ -1409,7 +1409,6 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
             : { threadId, resume: sourceThread.providerSessionId };
         const provider = ProviderDriverKind.make(source);
         const harness = yield* makeTestProviderAdapterHarness({ provider });
-        const importSettled = yield* Deferred.make<void>();
         const turnSent = yield* Deferred.make<void>();
         const startSession = vi.fn(harness.adapter.startSession);
         const sendTurn = vi.fn((input: ProviderSendTurnInput) =>
@@ -1434,22 +1433,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         );
         const reactorLayer = ProviderCommandReactorLive.pipe(
           Layer.provideMerge(providerLayer),
-          Layer.provide(
-            Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
-              ...snapshots,
-              // Acknowledge the imported settlement before draining the reactor.
-              getThreadShellById: (requestedThreadId) =>
-                snapshots
-                  .getThreadShellById(requestedThreadId)
-                  .pipe(
-                    Effect.tap(() =>
-                      requestedThreadId === threadId
-                        ? Deferred.succeed(importSettled, undefined)
-                        : Effect.void,
-                    ),
-                  ),
-            }),
-          ),
+          Layer.provide(Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, snapshots)),
           Layer.provide(
             Layer.mock(ProviderAuthService)({
               tryHandlePromptCommand: () => Effect.succeed(false),
@@ -1480,7 +1464,6 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
             importedCount: 1,
             skippedCount: 0,
           });
-          yield* Deferred.await(importSettled);
           yield* reactor.drain;
           expect(startSession).not.toHaveBeenCalled();
           expect(sendTurn).not.toHaveBeenCalled();
