@@ -378,7 +378,12 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
               runtimeMode: DEFAULT_RUNTIME_MODE,
               resumeCursor:
                 thread.source === "codex"
-                  ? { threadId: thread.providerSessionId }
+                  ? {
+                      threadId: thread.providerSessionId,
+                      ...(thread.sessionHomePath === undefined
+                        ? {}
+                        : { homePath: thread.sessionHomePath }),
+                    }
                   : { threadId, resume: thread.providerSessionId },
               runtimePayload: { cwd: workspaceRoot },
             },

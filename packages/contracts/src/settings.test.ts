@@ -107,6 +107,23 @@ describe("ServerSettings default permissions", () => {
   });
 });
 
+describe("ServerSettings Codex session homes", () => {
+  it("defaults to the active Codex home and round-trips additional homes", () => {
+    expect(decodeServerSettings({}).codexAdditionalSessionHomes).toEqual([]);
+    const input = { codexAdditionalSessionHomes: ["~/.codex-personal", "/srv/codex-work"] };
+    expect(decodeServerSettings(input).codexAdditionalSessionHomes).toEqual(
+      input.codexAdditionalSessionHomes,
+    );
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("rejects empty additional Codex homes", () => {
+    expect(() => decodeServerSettings({ codexAdditionalSessionHomes: ["  "] })).toThrow();
+    expect(() => decodeServerSettingsPatch({ codexAdditionalSessionHomes: [""] })).toThrow();
+  });
+});
+
 describe("ServerSettings usage price overrides", () => {
   const prices = { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 };
 

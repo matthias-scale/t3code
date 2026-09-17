@@ -162,6 +162,7 @@ interface AgentSessionTranscriptMetadata {
   readonly fallbackSessionId: string;
   readonly lastActiveAtMs: number;
   readonly canonicalTitle?: string;
+  readonly sessionHomePath?: string;
 }
 
 export interface AgentSessionThreadMessage {
@@ -175,6 +176,7 @@ export interface AgentSessionThread {
   readonly source: AgentSessionSource;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerSessionId: string;
+  readonly sessionHomePath?: string;
   readonly title: string;
   readonly model: string | null;
   readonly createdAt: string;
@@ -227,6 +229,7 @@ interface RawCandidate {
     readonly filePath: string;
     readonly mtimeMs: number | null;
     readonly canonicalTitle: string | null;
+    readonly sessionHomePath?: string;
   }>;
 }
 
@@ -236,6 +239,7 @@ interface TranscriptCandidate {
   readonly providerInstanceId: ProviderInstanceId;
   readonly size: number;
   readonly canonicalTitle: string | null;
+  readonly sessionHomePath?: string;
 }
 
 /** Parse the valid named entries from Codex's best-effort session index. */
@@ -273,7 +277,10 @@ interface MetadataReadBudget {
 function selectMetadataTranscripts(transcripts: ReadonlyArray<TranscriptCandidate>) {
   const selected: Array<TranscriptCandidate> = [];
   let pending = Array.from(
-    Map.groupBy(transcripts, (transcript) => transcript.providerInstanceId).values(),
+    Map.groupBy(
+      transcripts,
+      (transcript) => `${transcript.providerInstanceId}\0${transcript.sessionHomePath ?? ""}`,
+    ).values(),
     (entries) => entries.values(),
   );
   while (pending.length > 0 && selected.length < MAX_TRANSCRIPTS_PER_SOURCE) {
@@ -615,6 +622,7 @@ function parseAgentSessionRecords(
     source: input.source,
     providerInstanceId: input.providerInstanceId,
     providerSessionId,
+    ...(input.sessionHomePath === undefined ? {} : { sessionHomePath: input.sessionHomePath }),
     title: customTitle ?? title ?? firstDerivedTitle ?? "Imported thread",
     model,
     createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
@@ -1127,7 +1135,12 @@ export const make = Effect.gen(function* () {
   );
 
   const discoverCodexTranscripts = Effect.fn("AgentSessionScanner.discoverCodexTranscripts")(
-    function* (homePath: string, providerInstanceId: ProviderInstanceId, operationBudget: number) {
+    function* (
+      homePath: string,
+      providerInstanceId: ProviderInstanceId,
+      operationBudget: number,
+      sessionHomePath?: string,
+    ) {
       const sessionsDir = path.join(homePath, "sessions");
       const indexPath = path.join(homePath, "session_index.jsonl");
       const indexContents = yield* readFileStringBounded(
@@ -1195,6 +1208,7 @@ export const make = Effect.gen(function* () {
                         /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/i,
                       )?.[1] ?? "",
                     ) ?? null,
+                  ...(sessionHomePath === undefined ? {} : { sessionHomePath }),
                 });
               }
             }
@@ -1292,8 +1306,26 @@ export const make = Effect.gen(function* () {
         const rightDefault = right.instanceId === source ? 0 : 1;
         return leftDefault - rightDefault;
       });
-      const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
+      const homes: Array<{
+        homePath: string;
+        providerInstanceId: ProviderInstanceId;
+        sessionHomePath?: string;
+      }> = [];
       const seenHomes = new Set<string>();
+      const addHome = Effect.fn("AgentSessionScanner.addHome")(function* (
+        homePath: string,
+        providerInstanceId: ProviderInstanceId,
+        sessionHomePath?: string,
+      ) {
+        const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
+        if (seenHomes.has(homeKey)) return;
+        seenHomes.add(homeKey);
+        homes.push({
+          homePath,
+          providerInstanceId,
+          ...(sessionHomePath === undefined ? {} : { sessionHomePath }),
+        });
+      });
       for (const { instanceId, config: instance } of instances) {
         const homeVariable = source === "claudeAgent" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME";
         const environmentHome =
@@ -1320,10 +1352,13 @@ export const make = Effect.gen(function* () {
           homePath = layout.sharedHomePath;
         }
 
-        const homeKey = `${source}\0${yield* directoryIdentity(homePath)}`;
-        if (seenHomes.has(homeKey)) continue;
-        seenHomes.add(homeKey);
-        homes.push({ homePath, providerInstanceId: instanceId });
+        yield* addHome(homePath, instanceId);
+        if (source === "codex" && instanceId === ProviderInstanceId.make("codex")) {
+          for (const configuredHome of settings.codexAdditionalSessionHomes) {
+            const additionalHome = path.resolve(expandHomePath(configuredHome));
+            yield* addHome(additionalHome, instanceId, additionalHome);
+          }
+        }
       }
 
       const transcriptCandidates: Array<TranscriptCandidate> = [];
@@ -1339,7 +1374,12 @@ export const make = Effect.gen(function* () {
         }
         const discovered = yield* source === "claudeAgent"
           ? discoverClaudeTranscripts(home.homePath, home.providerInstanceId, operationBudget)
-          : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
+          : discoverCodexTranscripts(
+              home.homePath,
+              home.providerInstanceId,
+              operationBudget,
+              home.sessionHomePath,
+            );
         truncated ||= discovered.truncated;
         transcriptCandidates.push(...discovered.transcripts);
       }
@@ -1628,6 +1668,9 @@ export const make = Effect.gen(function* () {
               ...(transcript.canonicalTitle === null
                 ? {}
                 : { canonicalTitle: transcript.canonicalTitle }),
+              ...(transcript.sessionHomePath === undefined
+                ? {}
+                : { sessionHomePath: transcript.sessionHomePath }),
             },
             snapshot.records,
           );

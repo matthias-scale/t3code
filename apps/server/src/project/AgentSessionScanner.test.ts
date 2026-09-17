@@ -78,6 +78,7 @@ interface ScannerTestInput {
   /** Base dir for the test ServerConfig; worktreesDir derives from it. */
   readonly configBaseDir?: string;
   readonly providerInstances?: ContractServerSettings["providerInstances"];
+  readonly codexAdditionalSessionHomes?: ReadonlyArray<string>;
 }
 
 const makeScannerTestLayer = (input: ScannerTestInput) =>
@@ -92,6 +93,9 @@ const makeScannerTestLayer = (input: ScannerTestInput) =>
           ...(input.providerInstances === undefined
             ? {}
             : { providerInstances: input.providerInstances }),
+          ...(input.codexAdditionalSessionHomes === undefined
+            ? {}
+            : { codexAdditionalSessionHomes: input.codexAdditionalSessionHomes }),
         }),
         ServerConfig.layerTest(
           input.claudeHomePath,
@@ -655,6 +659,35 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         expect(result.candidates.map((candidate) => candidate.path).sort()).toEqual(
           [workspace, otherWorkspace].sort(),
         );
+      }),
+    );
+
+    it.effect("expands home-relative additional Codex session paths", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-codex-expand-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-expand-active-");
+        const expectedSessionsDir = path.join(NodeOS.homedir(), ".codex-history", "sessions");
+        let readExpandedHome = false;
+        const observedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          readDirectory: (directory, options) => {
+            if (directory === expectedSessionsDir) {
+              readExpandedHome = true;
+              return Effect.succeed([]);
+            }
+            return fileSystem.readDirectory(directory, options);
+          },
+        });
+
+        yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          codexAdditionalSessionHomes: ["~/.codex-history"],
+        }).pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+
+        expect(readExpandedHome).toBe(true);
       }),
     );
 
@@ -2663,6 +2696,133 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
 
         expect(threads[0]?.title).toBe("Prototype MetaApi trade replication");
       }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "reads additional Codex homes once, keeps both indices, and prefers the newest duplicate",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-multi-home-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-multi-home-active-");
+          const additionalHome = yield* makeTempDir("t3code-multi-home-extra-");
+          const aliasParent = yield* makeTempDir("t3code-multi-home-alias-");
+          const additionalAlias = path.join(aliasParent, "codex-alias");
+          const workspaceRoot = yield* makeTempDir("t3code-multi-home-workspace-");
+          const activeSessionId = "01a0a0b4-3958-7382-82b2-b22b8bb830ba";
+          const extraSessionId = "01a0a0b4-3958-7382-82b2-b22b8bb830bb";
+          const overlapSessionId = "01a0a0b4-3958-7382-82b2-b22b8bb830bc";
+          yield* fileSystem.symlink(additionalHome, additionalAlias);
+
+          const writeCodexSession = (input: {
+            readonly home: string;
+            readonly sessionId: string;
+            readonly prompt: string;
+            readonly mtimeMs: number;
+          }) =>
+            writeTranscript({
+              filePath: path.join(
+                input.home,
+                "sessions",
+                "2026",
+                "08",
+                "24",
+                `rollout-${input.sessionId}.jsonl`,
+              ),
+              contents: [
+                encodeTranscriptRecord({
+                  type: "session_meta",
+                  payload: { id: input.sessionId, cwd: workspaceRoot },
+                }),
+                encodeTranscriptRecord({
+                  type: "event_msg",
+                  payload: { type: "user_message", message: input.prompt },
+                }),
+              ].join("\n"),
+              mtimeMs: input.mtimeMs,
+            });
+
+          yield* writeCodexSession({
+            home: codexHomePath,
+            sessionId: activeSessionId,
+            prompt: "Active prompt",
+            mtimeMs: nowMs - 3_000,
+          });
+          yield* writeCodexSession({
+            home: additionalHome,
+            sessionId: extraSessionId,
+            prompt: "Extra prompt",
+            mtimeMs: nowMs - 2_000,
+          });
+          yield* writeCodexSession({
+            home: codexHomePath,
+            sessionId: overlapSessionId,
+            prompt: "Stale overlap",
+            mtimeMs: nowMs - 4_000,
+          });
+          yield* writeCodexSession({
+            home: additionalHome,
+            sessionId: overlapSessionId,
+            prompt: "Newest overlap",
+            mtimeMs: nowMs - 1_000,
+          });
+          yield* fileSystem.writeFileString(
+            path.join(codexHomePath, "session_index.jsonl"),
+            `${encodeTranscriptRecord({ id: activeSessionId, thread_name: "Active title" })}\n`,
+          );
+          yield* fileSystem.writeFileString(
+            path.join(additionalHome, "session_index.jsonl"),
+            [
+              encodeTranscriptRecord({ id: extraSessionId, thread_name: "Extra title" }),
+              encodeTranscriptRecord({ id: overlapSessionId, thread_name: "Newest title" }),
+            ].join("\n"),
+          );
+
+          const outcomes = yield* runRecentThreadOutcomes({
+            claudeHomePath,
+            codexHomePath,
+            codexAdditionalSessionHomes: [additionalHome, additionalAlias],
+            workspaceRoot,
+          });
+          const importable = outcomes.flatMap((outcome) =>
+            outcome._tag === "Importable" ? [outcome.thread] : [],
+          );
+
+          expect(importable.map((thread) => thread.providerSessionId).sort()).toEqual(
+            [activeSessionId, extraSessionId, overlapSessionId].sort(),
+          );
+          expect(importable.map((thread) => thread.providerInstanceId)).toEqual([
+            "codex",
+            "codex",
+            "codex",
+          ]);
+          expect(
+            Object.fromEntries(
+              importable.map((thread) => [thread.providerSessionId, thread.title]),
+            ),
+          ).toEqual({
+            [activeSessionId]: "Active title",
+            [extraSessionId]: "Extra title",
+            [overlapSessionId]: "Newest title",
+          });
+          expect(
+            importable.find((thread) => thread.providerSessionId === overlapSessionId)?.messages[0]
+              ?.text,
+          ).toBe("Newest overlap");
+          expect(
+            Object.fromEntries(
+              importable.map((thread) => [thread.providerSessionId, thread.sessionHomePath]),
+            ),
+          ).toEqual({
+            [activeSessionId]: undefined,
+            [extraSessionId]: additionalHome,
+            [overlapSessionId]: additionalHome,
+          });
+          expect(outcomes.filter((outcome) => outcome._tag === "Duplicate")).toHaveLength(1);
+        }),
     );
 
     it.effect("bounds index growth after the opened-handle stat", () =>

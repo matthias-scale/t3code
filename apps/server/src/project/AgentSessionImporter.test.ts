@@ -1109,6 +1109,127 @@ const integrationLayer = Layer.mergeAll(
 );
 
 it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
+  it.effect("syncs appended history and index titles from an additional Codex home", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+      yield* TestClock.setTime(nowMs);
+      const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-import-additional-home-",
+      });
+      const workspaceRoot = path.join(fixtureDir, "workspace");
+      const claudeHomePath = path.join(fixtureDir, "claude");
+      const codexHomePath = path.join(fixtureDir, "codex-active");
+      const additionalHome = path.join(fixtureDir, "codex-additional");
+      const sessionId = "01a0a0b4-3958-7382-82b2-b22b8bb830bd";
+      const threadId = ThreadId.make(`import:codex:${sessionId}`);
+      const transcriptPath = path.join(
+        additionalHome,
+        "sessions",
+        "2026",
+        "08",
+        "24",
+        `rollout-${sessionId}.jsonl`,
+      );
+      const indexPath = path.join(additionalHome, "session_index.jsonl");
+      const projectId = ProjectId.make("project-additional-codex-home");
+      yield* fileSystem.makeDirectory(workspaceRoot, { recursive: true });
+      yield* fileSystem.makeDirectory(claudeHomePath, { recursive: true });
+      yield* fileSystem.makeDirectory(codexHomePath, { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(transcriptPath), { recursive: true });
+
+      const transcriptRecords = [
+        encodeTranscriptRecord({
+          timestamp: "2026-08-24T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: sessionId, cwd: workspaceRoot },
+        }),
+        encodeTranscriptRecord({
+          timestamp: "2026-08-24T10:01:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Initial prompt" },
+        }),
+        encodeTranscriptRecord({
+          timestamp: "2026-08-24T10:02:00.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Initial response" }],
+          },
+        }),
+      ];
+      yield* fileSystem.writeFileString(transcriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.writeFileString(
+        indexPath,
+        `${encodeTranscriptRecord({ id: sessionId, thread_name: "Initial title" })}\n`,
+      );
+      yield* fileSystem.utimes(transcriptPath, nowMs / 1_000 - 2, nowMs / 1_000 - 2);
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("create-additional-codex-home-project"),
+        projectId,
+        title: "Additional Codex home",
+        workspaceRoot,
+        defaultModelSelection: null,
+        createdAt: "2026-08-24T09:00:00.000Z",
+      });
+      const settingsLayer = ServerSettingsService.layerTest({
+        providers: {
+          claudeAgent: { homePath: claudeHomePath },
+          codex: { homePath: codexHomePath },
+        },
+        codexAdditionalSessionHomes: [additionalHome],
+      });
+      const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
+        Effect.provide(Layer.fresh(AgentSessionScanner.layer).pipe(Layer.provide(settingsLayer))),
+      );
+      const runSweep = Effect.gen(function* () {
+        yield* scanner.scan;
+        return yield* importRecentAgentThreads({ projectId }).pipe(
+          Effect.provideService(AgentSessionScanner.AgentSessionScanner, scanner),
+        );
+      });
+
+      expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
+      expect(Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId)).title).toBe(
+        "Initial title",
+      );
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId))).toMatchObject({
+        resumeCursor: { threadId: sessionId, homePath: additionalHome },
+      });
+
+      transcriptRecords.push(
+        encodeTranscriptRecord({
+          timestamp: "2026-08-24T10:03:00.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Appended from the other home" },
+        }),
+      );
+      yield* fileSystem.writeFileString(transcriptPath, transcriptRecords.join("\n"));
+      yield* fileSystem.writeFileString(
+        indexPath,
+        `${encodeTranscriptRecord({ id: sessionId, thread_name: "Renamed in Codex" })}\n`,
+      );
+      yield* fileSystem.utimes(transcriptPath, nowMs / 1_000 - 1, nowMs / 1_000 - 1);
+
+      expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
+      expect(yield* runSweep).toEqual({ importedCount: 1, skippedCount: 0 });
+      const synced = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+      expect(synced.title).toBe("Renamed in Codex");
+      expect(synced.messages.map((message) => message.text)).toEqual([
+        "Initial prompt",
+        "Initial response",
+        "Appended from the other home",
+      ]);
+    }),
+  );
+
   it.effect("imports once after the real engine persists an old rejected receipt", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngine.OrchestrationEngineService;

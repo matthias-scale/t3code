@@ -164,6 +164,27 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }),
   );
 
+  it.effect("persists additional Codex session homes", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const fileSystem = yield* FileSystem.FileSystem;
+
+      const next = yield* serverSettings.updateSettings({
+        codexAdditionalSessionHomes: ["~/.codex-personal", "/srv/codex-work"],
+      });
+      const persisted = yield* fileSystem
+        .readFileString(serverConfig.settingsPath)
+        .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings))));
+
+      assert.deepEqual(next.codexAdditionalSessionHomes, ["~/.codex-personal", "/srv/codex-work"]);
+      assert.deepEqual(persisted.codexAdditionalSessionHomes, [
+        "~/.codex-personal",
+        "/srv/codex-work",
+      ]);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect(
     "decodes legacy object-shaped textGenerationModelSelection.options from settings.json",
     () =>
