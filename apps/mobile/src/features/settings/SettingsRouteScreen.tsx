@@ -58,7 +58,11 @@ import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { resolveAgentAwarenessPlatformPresentation } from "./SettingsRouteScreen.logic";
-import { planAutoSettleSettingsSync, type AutoSettleSettings } from "./autoSettleSettingsSync";
+import {
+  planAutoSettleSettingsSync,
+  planAutoSettleSettingsWrites,
+  type AutoSettleSettings,
+} from "./autoSettleSettingsSync";
 
 type NotificationStatus = "checking" | "enabled" | "disabled" | "unsupported";
 type LiveActivityStatus = "checking" | "enabled" | "disabled" | "signed-out" | "linking";
@@ -637,8 +641,14 @@ function AutoSettleSettingsRows() {
   const writeToAll = (patch: Partial<AutoSettleSettings>) => {
     setPendingWrites((count) => count + 1);
     void Promise.allSettled(
-      syncTargets.map((environment) =>
-        updateSettings({ environmentId: environment.environmentId, input: { patch } }),
+      planAutoSettleSettingsWrites(
+        patch,
+        syncTargets.map((environment) => ({
+          environmentId: environment.environmentId,
+          capabilities: environment.serverConfig?.environment.capabilities,
+        })),
+      ).map((write) =>
+        updateSettings({ environmentId: write.environmentId, input: { patch: write.patch } }),
       ),
     ).finally(() => setPendingWrites((count) => count - 1));
   };

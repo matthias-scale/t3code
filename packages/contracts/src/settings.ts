@@ -1040,6 +1040,10 @@ const ProjectSettingsOverridesEncoded = Schema.Struct({
   sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
 });
+const ProjectSettingsOverridesPatch = Schema.Struct({
+  ...ProjectSettingsOverridesCurrent.fields,
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
+});
 export const ProjectSettingsOverrides = ProjectSettingsOverridesEncoded.pipe(
   Schema.decodeTo(
     Schema.toType(ProjectSettingsOverridesCurrent),
@@ -1514,13 +1518,14 @@ export const ServerSettingsPatch = Schema.Struct({
    * current entry from the last settings snapshot.
    */
   projectSettingsOverrides: Schema.optionalKey(
-    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
+    Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverridesPatch)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
   sidebarAutoSettleAfterHours: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterHours)),
+  sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(LegacySidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

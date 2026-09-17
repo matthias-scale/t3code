@@ -1,4 +1,9 @@
-import type { EnvironmentId, ServerSettings } from "@t3tools/contracts";
+import { adaptServerSettingsPatchForCapabilities } from "@t3tools/client-runtime/state/shared-settings";
+import type {
+  EnvironmentId,
+  ExecutionEnvironmentCapabilities,
+  ServerSettings,
+} from "@t3tools/contracts";
 
 export type AutoSettleSettings = Pick<
   ServerSettings,
@@ -9,6 +14,21 @@ interface AutoSettleSyncTarget {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly settings: AutoSettleSettings | null;
+}
+
+interface AutoSettleWriteTarget {
+  readonly environmentId: EnvironmentId;
+  readonly capabilities?: Pick<ExecutionEnvironmentCapabilities, "threadAutoSettlementHours">;
+}
+
+export function planAutoSettleSettingsWrites(
+  patch: Partial<AutoSettleSettings>,
+  targets: readonly AutoSettleWriteTarget[],
+) {
+  return targets.map((target) => ({
+    environmentId: target.environmentId,
+    patch: adaptServerSettingsPatchForCapabilities(patch, target.capabilities),
+  }));
 }
 
 /** Receives connected, capable targets. Applying these defaults must preserve other settings. */

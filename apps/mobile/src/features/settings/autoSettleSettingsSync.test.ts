@@ -1,7 +1,7 @@
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { planAutoSettleSettingsSync } from "./autoSettleSettingsSync";
+import { planAutoSettleSettingsSync, planAutoSettleSettingsWrites } from "./autoSettleSettingsSync";
 
 const reference = {
   environmentId: EnvironmentId.make("reference"),
@@ -15,6 +15,32 @@ const reference = {
 };
 
 describe("auto-settle settings sync", () => {
+  it("writes legacy days and current hours per target", () => {
+    const legacyId = EnvironmentId.make("legacy");
+    const currentId = EnvironmentId.make("current");
+
+    expect(
+      planAutoSettleSettingsWrites({ sidebarAutoSettleAfterHours: 25 }, [
+        { environmentId: legacyId, capabilities: {} },
+        {
+          environmentId: currentId,
+          capabilities: { threadAutoSettlementHours: true },
+        },
+      ]),
+    ).toEqual([
+      { environmentId: legacyId, patch: { sidebarAutoSettleAfterDays: 2 } },
+      { environmentId: currentId, patch: { sidebarAutoSettleAfterHours: 25 } },
+    ]);
+  });
+
+  it("preserves a disabled inactivity threshold for legacy targets", () => {
+    expect(
+      planAutoSettleSettingsWrites({ sidebarAutoSettleAfterHours: null }, [
+        { environmentId: EnvironmentId.make("legacy") },
+      ])[0]?.patch,
+    ).toEqual({ sidebarAutoSettleAfterDays: null });
+  });
+
   it("ignores differences in independently configured environment settings", () => {
     const target = {
       environmentId: EnvironmentId.make("remote"),

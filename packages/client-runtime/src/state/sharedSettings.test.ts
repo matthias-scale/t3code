@@ -8,6 +8,7 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  adaptServerSettingsPatchForCapabilities,
   filterSharedServerPatch,
   findSharedSettingsMismatches,
   pickSharedServerSettings,
@@ -18,7 +19,10 @@ import {
 const primaryId = EnvironmentId.make("env-primary");
 const laptopId = EnvironmentId.make("env-laptop");
 const boxId = EnvironmentId.make("env-box");
-const restartCapabilities = { threadRestartContinuation: true };
+const restartCapabilities = {
+  threadRestartContinuation: true,
+  threadAutoSettlementHours: true,
+};
 
 describe("supportsSharedSettingsSync", () => {
   it("accepts only connected servers that advertise the shared-settings capability", () => {
@@ -134,6 +138,31 @@ describe("pickSharedServerSettings", () => {
 });
 
 describe("filterSharedServerPatch", () => {
+  it("writes days to legacy servers and hours to current servers", () => {
+    const patch = { sidebarAutoSettleAfterHours: 25 };
+    expect(filterSharedServerPatch(patch, {})).toEqual({ sidebarAutoSettleAfterDays: 2 });
+    expect(filterSharedServerPatch(patch, { threadAutoSettlementHours: true })).toEqual(patch);
+  });
+
+  it("preserves null and converts project overrides for legacy servers", () => {
+    expect(
+      adaptServerSettingsPatchForCapabilities(
+        {
+          sidebarAutoSettleAfterHours: null,
+          projectSettingsOverrides: {
+            [ProjectId.make("project")]: { sidebarAutoSettleAfterHours: 1 },
+          },
+        },
+        {},
+      ),
+    ).toEqual({
+      sidebarAutoSettleAfterDays: null,
+      projectSettingsOverrides: {
+        [ProjectId.make("project")]: { sidebarAutoSettleAfterDays: 1 },
+      },
+    });
+  });
+
   it.each([true, false])(
     "resets a disabled default provider only on the originating environment (%s)",
     (targetIsSource) => {
@@ -157,14 +186,20 @@ describe("filterSharedServerPatch", () => {
         continueThreadsAfterServerUpdate: true,
         sidebarAutoSettleAfterHours: 7,
       };
-      expect(filterSharedServerPatch(patch, undefined, settings, settings, targetIsSource)).toEqual(
-        {
-          ...(targetIsSource
-            ? { textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection }
-            : {}),
-          sidebarAutoSettleAfterHours: 7,
-        },
-      );
+      expect(
+        filterSharedServerPatch(
+          patch,
+          { threadAutoSettlementHours: true },
+          settings,
+          settings,
+          targetIsSource,
+        ),
+      ).toEqual({
+        ...(targetIsSource
+          ? { textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection }
+          : {}),
+        sidebarAutoSettleAfterHours: 7,
+      });
     },
   );
 
@@ -227,7 +262,7 @@ describe("filterSharedServerPatch", () => {
           { continueThreadsAfterServerUpdate: true, sidebarAutoSettleAfterHours: 7 },
           capabilities,
         ),
-      ).toEqual({ sidebarAutoSettleAfterHours: 7 });
+      ).toEqual({ sidebarAutoSettleAfterDays: 1 });
       expect(pickSharedServerSettings(DEFAULT_SERVER_SETTINGS, capabilities)).not.toHaveProperty(
         "continueThreadsAfterServerUpdate",
       );

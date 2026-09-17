@@ -17,6 +17,7 @@ const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodeUnknownServerSettings = Schema.encodeUnknownSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
@@ -681,6 +682,21 @@ describe("ServerSettings thread settlement", () => {
         sidebarAutoSettleOnMerge: false,
       }),
     ).toMatchObject({ sidebarAutoSettleAfterHours: null, sidebarAutoSettleOnMerge: false });
+  });
+
+  it("preserves legacy day patches through RPC encoding", () => {
+    const patch = decodeServerSettingsPatch({
+      sidebarAutoSettleAfterDays: 2,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterDays: null },
+      },
+    });
+    expect(encodeServerSettingsPatch(patch)).toEqual({
+      sidebarAutoSettleAfterDays: 2,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterDays: null },
+      },
+    });
   });
 
   it("encodes sparse and migrated settings without requiring unrelated keys", () => {
