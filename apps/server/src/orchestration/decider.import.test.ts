@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { manualImportedTitleSyncPolicy } from "./ImportedTitleSyncPolicy.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
 function makeImportedReadModel(
@@ -150,6 +151,91 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       ]) {
         expect((yield* Effect.flip(race))._tag).toBe("OrchestrationCommandInvariantError");
       }
+    }),
+  );
+
+  it.effect("retains a Herdr marker across consecutive imported title syncs", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("import:codex:marked-title");
+      const makeReadModel = (title: string): OrchestrationReadModel => ({
+        ...createEmptyReadModel("2026-08-24T10:00:00.000Z"),
+        threads: [
+          {
+            id: threadId,
+            projectId: ProjectId.make("project-1"),
+            title,
+            titleState: {
+              source: "manual",
+              version: CommandId.make("manual-title"),
+              needsRefinement: false,
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            pullRequests: [],
+            latestTurn: null,
+            createdAt: "2026-08-24T10:00:00.000Z",
+            updatedAt: "2026-08-24T10:00:00.000Z",
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            snoozedUntil: null,
+            snoozedAt: null,
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          },
+        ],
+      });
+      const decideProviderSync = (
+        readModel: OrchestrationReadModel,
+        providerTitle: string,
+        commandId: CommandId,
+      ) => {
+        const thread = readModel.threads[0]!;
+        const policy =
+          thread.titleState?.source === "manual"
+            ? manualImportedTitleSyncPolicy(thread.title)
+            : undefined;
+        return decideOrchestrationCommand({
+          command: {
+            type: "thread.title.import.sync",
+            commandId,
+            threadId,
+            title: `${policy?.prefix ?? ""}${providerTitle}`,
+            expectedTitle: thread.title,
+            expectedVersion: thread.titleState?.version ?? null,
+          },
+          readModel,
+        });
+      };
+
+      let readModel = makeReadModel("● Herdr ub2:t3:2 Existing title");
+      const first = yield* decideProviderSync(
+        readModel,
+        "First provider title",
+        CommandId.make("first-provider-sync"),
+      );
+      const firstEvent = Array.isArray(first) ? first[0]! : first;
+      readModel = yield* projectEvent(readModel, { ...firstEvent, sequence: 1 });
+      const second = yield* decideProviderSync(
+        readModel,
+        "Second provider title",
+        CommandId.make("second-provider-sync"),
+      );
+
+      expect(second).toMatchObject({
+        type: "thread.meta-updated",
+        payload: {
+          title: "● Herdr ub2:t3:2 Second provider title",
+          titleState: { source: "manual" },
+        },
+      });
     }),
   );
 

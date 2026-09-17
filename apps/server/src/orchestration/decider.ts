@@ -2161,7 +2161,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           title: command.title,
           titleState: {
-            source: "generated",
+            source: manualPolicy?.prefix ? "manual" : "generated",
             version: command.commandId,
             needsRefinement: false,
           },

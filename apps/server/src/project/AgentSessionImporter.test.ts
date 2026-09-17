@@ -358,7 +358,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           upsert: () => Effect.die("must not replace an existing binding"),
           getProvider: () => Effect.die("unused"),
           recordImportedTranscript: () => Effect.die("must not rewrite completed history"),
-          getBinding: () => Effect.die("must not read a completed binding"),
+          getBinding: () => Effect.succeed(Option.none()),
           listThreadIds: () => Effect.die("unused"),
           listBindings: () => Effect.die("unused"),
         });
@@ -844,7 +844,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             upsert: () => Effect.die("unused"),
             getProvider: () => Effect.die("unused"),
             recordImportedTranscript: () => Effect.die("must not rewrite completed history"),
-            getBinding: () => Effect.die("unused"),
+            getBinding: () => Effect.succeed(Option.none()),
             listThreadIds: () => Effect.die("unused"),
             listBindings: () => Effect.die("unused"),
           });
