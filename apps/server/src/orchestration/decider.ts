@@ -2060,26 +2060,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      const settledAt = messages.reduce(
-        (latest, message) =>
-          compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
-        thread.settledAt ?? firstMessage.createdAt,
-      );
-      events.push({
-        ...(yield* withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt: settledAt,
-          commandId: command.commandId,
-          metadata: { historyImport: true },
-        })),
-        type: "thread.settled",
-        payload: {
-          threadId: command.threadId,
-          settledAt,
-          updatedAt: settledAt,
-        },
-      });
+      if (!existingImportedHistory) {
+        const settledAt = messages.reduce(
+          (latest, message) =>
+            compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
+          thread.settledAt ?? firstMessage.createdAt,
+        );
+        events.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: settledAt,
+            commandId: command.commandId,
+            metadata: { historyImport: true },
+          })),
+          type: "thread.settled",
+          payload: {
+            threadId: command.threadId,
+            settledAt,
+            updatedAt: settledAt,
+          },
+        });
+      }
       return events;
     }
 

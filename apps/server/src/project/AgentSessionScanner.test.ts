@@ -2053,6 +2053,193 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect(
+      "reads a grown transcript from its recorded offset beyond the history byte budget",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3code-follow-large-claude-");
+          const codexHomePath = yield* makeTempDir("t3code-follow-large-codex-");
+          const workspace = yield* makeTempDir("t3code-follow-large-workspace-");
+          const filePath = path.join(
+            codexHomePath,
+            "sessions",
+            "2026",
+            "08",
+            "24",
+            "rollout-large.jsonl",
+          );
+          const oversizedPrompt = "x".repeat(33 * 1024 * 1024);
+          const initialContents = `${[
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id: "long-session", cwd: workspace },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: oversizedPrompt },
+            }),
+          ].join("\n")}\n`;
+          yield* writeTranscript({ filePath, contents: initialContents, mtimeMs: nowMs });
+          const initialStats = yield* fileSystem.stat(filePath);
+          const previousSource = {
+            provider: "codex" as const,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            providerSessionId: "long-session",
+            filePath,
+            size: Number(initialStats.size),
+            mtimeMs: null,
+            device: initialStats.dev,
+            inode: null,
+            birthtimeMs: null,
+          };
+          const appendedContents = `${[
+            encodeTranscriptRecord({
+              type: "response_item",
+              timestamp: "2026-08-24T12:01:00.000Z",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "First follow-up" }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              timestamp: "2026-08-24T12:02:00.000Z",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Second follow-up" }],
+              },
+            }),
+          ].join("\n")}\n`;
+          const grownAt = nowMs + 1_000;
+          yield* fileSystem.writeFileString(filePath, appendedContents, { flag: "a" });
+          yield* fileSystem.utimes(filePath, grownAt / 1_000, grownAt / 1_000);
+
+          const seekOffsets: Array<number> = [];
+          const observedFileSystem = FileSystem.FileSystem.of({
+            ...fileSystem,
+            open: (openedPath, options) =>
+              fileSystem.open(openedPath, options).pipe(
+                Effect.map((file) => ({
+                  ...file,
+                  stat: file.stat,
+                  readAlloc: (size: number) => file.readAlloc(size),
+                  seek: (offset, from) => {
+                    if (openedPath === filePath) seekOffsets.push(Number(offset));
+                    return file.seek(offset, from);
+                  },
+                })),
+              ),
+          });
+
+          const outcomes = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            return yield* scanner
+              .recentThreads(workspace, [previousSource])
+              .pipe(Stream.runCollect);
+          }).pipe(
+            Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+            Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+          );
+          const outcome = outcomes[0];
+          expect(outcome?._tag).toBe("Importable");
+          if (outcome?._tag !== "Importable") return;
+
+          expect(outcome.appendFromByteOffset).toBe(previousSource.size);
+          expect(outcome.thread.providerSessionId).toBe("long-session");
+          expect(outcome.thread.messages.map((message) => message.text)).toEqual([
+            "First follow-up",
+            "Second follow-up",
+          ]);
+          expect(outcome.messageOffsets?.every((offset) => offset >= previousSource.size)).toBe(
+            true,
+          );
+          expect(seekOffsets).toContain(previousSource.size - 64 * 1024);
+        }),
+    );
+
+    it.effect("deduplicates a Codex response user across the append boundary", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-follow-codex-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-follow-codex-home-");
+        const workspace = yield* makeTempDir("t3code-follow-codex-workspace-");
+        const filePath = path.join(
+          codexHomePath,
+          "sessions",
+          "2026",
+          "08",
+          "24",
+          "rollout-boundary.jsonl",
+        );
+        const initialContents = `${[
+          encodeTranscriptRecord({
+            type: "session_meta",
+            payload: { id: "boundary-session", cwd: workspace },
+          }),
+          encodeTranscriptRecord({
+            type: "turn_context",
+            payload: { model: "gpt-5", ignored: "x".repeat(128 * 1024) },
+          }),
+          encodeTranscriptRecord({
+            type: "event_msg",
+            payload: { type: "user_message", message: "The canonical prompt" },
+          }),
+        ].join("\n")}\n`;
+        yield* writeTranscript({ filePath, contents: initialContents, mtimeMs: nowMs });
+
+        const followed = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const initialOutcomes = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          const initial = initialOutcomes[0];
+          expect(initial?._tag).toBe("Importable");
+          if (initial?._tag !== "Importable") return null;
+
+          const appendedContents = `${[
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "user",
+                internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+                content: [{ type: "input_text", text: "The canonical prompt" }],
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Follow-up answer" }],
+              },
+            }),
+          ].join("\n")}\n`;
+          const grownAt = nowMs + 1_000;
+          yield* fileSystem.writeFileString(filePath, appendedContents, { flag: "a" });
+          yield* fileSystem.utimes(filePath, grownAt / 1_000, grownAt / 1_000);
+          const grownOutcomes = yield* scanner
+            .recentThreads(workspace, [initial.source])
+            .pipe(Stream.runCollect);
+          const grown = grownOutcomes[0];
+          expect(grown?._tag).toBe("Importable");
+          if (grown?._tag !== "Importable") return null;
+          return grown.thread.messages.flatMap((message, index) =>
+            (grown.messageOffsets?.[index] ?? -1) >= initial.source.size ? [message.text] : [],
+          );
+        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+
+        expect(followed).toEqual(["Follow-up answer"]);
+      }),
+    );
+
     it.effect("imports visible history from a transcript with an oversized tool record", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

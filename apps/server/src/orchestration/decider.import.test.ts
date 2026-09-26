@@ -225,7 +225,42 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
           updatedAt: createdAt,
         },
       });
-      const previousMessage = readModel.threads[0]?.messages[0];
+      const settledReadModel = yield* projectEvent(readModel, {
+        sequence: 3,
+        eventId: EventId.make("event-follow-thread-settled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.settled",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-thread-settled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-settled"),
+        metadata: { historyImport: true },
+        payload: { threadId, settledAt: createdAt, updatedAt: createdAt },
+      });
+      const readModelAfterUnsettle = yield* projectEvent(settledReadModel, {
+        sequence: 4,
+        eventId: EventId.make("event-follow-thread-unsettled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.unsettled",
+        occurredAt: "2026-08-24T10:00:30.000Z",
+        commandId: CommandId.make("command-follow-thread-unsettled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-unsettled"),
+        metadata: {},
+        payload: {
+          threadId,
+          reason: "user",
+          updatedAt: "2026-08-24T10:00:30.000Z",
+        },
+      });
+      const previousMessage = readModelAfterUnsettle.threads[0]?.messages[0];
+      const previousLifecycle = {
+        settledOverride: readModelAfterUnsettle.threads[0]?.settledOverride,
+        settledAt: readModelAfterUnsettle.threads[0]?.settledAt,
+        unsettledAt: readModelAfterUnsettle.threads[0]?.unsettledAt,
+      };
       const command = {
         type: "thread.history.import" as const,
         commandId,
@@ -239,11 +274,14 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
           },
         ],
       };
-      const events = yield* decideOrchestrationCommand({ command, readModel });
+      const events = yield* decideOrchestrationCommand({
+        command,
+        readModel: readModelAfterUnsettle,
+      });
       const plannedEvents = Array.isArray(events) ? events : [events];
-      let projected = readModel;
+      let projected = readModelAfterUnsettle;
       for (const [index, event] of plannedEvents.entries()) {
-        projected = yield* projectEvent(projected, { ...event, sequence: index + 3 });
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 5 });
       }
 
       expect(plannedEvents).toMatchObject([
@@ -251,13 +289,18 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
           type: "thread.message-sent",
           payload: { messageId: `${threadId}:transcript:64`, text: "Follow-up answer" },
         },
-        { type: "thread.settled" },
       ]);
+      expect(plannedEvents.some((event) => event.type === "thread.settled")).toBe(false);
       expect(projected.threads[0]?.messages[0]).toEqual(previousMessage);
       expect(projected.threads[0]?.messages.map((message) => message.id)).toEqual([
         `${threadId}:000000`,
         `${threadId}:transcript:64`,
       ]);
+      expect({
+        settledOverride: projected.threads[0]?.settledOverride,
+        settledAt: projected.threads[0]?.settledAt,
+        unsettledAt: projected.threads[0]?.unsettledAt,
+      }).toEqual(previousLifecycle);
 
       const repeated = yield* Effect.flip(
         decideOrchestrationCommand({

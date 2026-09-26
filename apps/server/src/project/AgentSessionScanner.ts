@@ -91,6 +91,8 @@ const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
 const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
+/** Keep nearby Codex event and response records together for de-duplication. */
+const TRANSCRIPT_APPEND_OVERLAP_BYTES = 64 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
@@ -148,6 +150,7 @@ interface AgentSessionTranscriptMetadata {
   readonly source: AgentSessionSource;
   readonly providerInstanceId: ProviderInstanceId;
   readonly fallbackSessionId: string;
+  readonly previousProviderSessionId?: string;
   readonly lastActiveAtMs: number;
 }
 
@@ -332,12 +335,13 @@ function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
   recordOffsets: ReadonlyArray<number>,
-  retainAllMessages = false,
+  appendRead = false,
 ): ParsedAgentSessionTranscript | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
-  let providerSessionId = input.source === "codex" ? "" : input.fallbackSessionId;
+  let providerSessionId =
+    input.source === "codex" ? (input.previousProviderSessionId ?? "") : input.fallbackSessionId;
   let title: string | null = null;
   let model: string | null = null;
   let hasCodexSessionId = false;
@@ -416,7 +420,7 @@ function parseAgentSessionRecords(
       firstUserMessage = retained;
     }
     messages.push(retained);
-    if (!retainAllMessages && messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
+    if (!appendRead && messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
   };
 
   const hasMatchingCodexEventInTurn = (text: string) => {
@@ -538,20 +542,34 @@ function parseAgentSessionRecords(
   const visibleMessages = messages.map(
     ({ value: { codexResponseUser: _codexResponseUser, ...message } }) => message,
   );
-  if (providerSessionId.trim().length === 0 || firstUserMessage === undefined) return null;
-  const firstUserMessageRetained = messages.includes(firstUserMessage);
-  const { codexResponseUser: _codexResponseUser, ...visibleFirstUserMessage } =
-    firstUserMessage.value;
-  const retainedMessages = firstUserMessageRetained
-    ? visibleMessages
-    : [visibleFirstUserMessage, ...visibleMessages.slice(-(MAX_IMPORTED_MESSAGES - 1))];
-  const retainedOffsets = firstUserMessageRetained
-    ? messages.map((message) => message.offset)
-    : [
-        firstUserMessage.offset,
-        ...messages.slice(-(MAX_IMPORTED_MESSAGES - 1)).map((message) => message.offset),
-      ];
-  const derivedTitle = visibleFirstUserMessage.text.trim().split("\n")[0]?.slice(0, 100).trim();
+  if (providerSessionId.trim().length === 0 || (firstUserMessage === undefined && !appendRead)) {
+    return null;
+  }
+  const firstUserMessageRetained =
+    firstUserMessage !== undefined && messages.includes(firstUserMessage);
+  const visibleFirstUserMessage =
+    firstUserMessage === undefined
+      ? undefined
+      : (({ codexResponseUser: _codexResponseUser, ...message }) => message)(
+          firstUserMessage.value,
+        );
+  let retainedMessages = visibleMessages;
+  let retainedOffsets = messages.map((message) => message.offset);
+  if (
+    firstUserMessage !== undefined &&
+    visibleFirstUserMessage !== undefined &&
+    !firstUserMessageRetained
+  ) {
+    retainedMessages = [
+      visibleFirstUserMessage,
+      ...visibleMessages.slice(-(MAX_IMPORTED_MESSAGES - 1)),
+    ];
+    retainedOffsets = [
+      firstUserMessage.offset,
+      ...messages.slice(-(MAX_IMPORTED_MESSAGES - 1)).map((message) => message.offset),
+    ];
+  }
+  const derivedTitle = visibleFirstUserMessage?.text.trim().split("\n")[0]?.slice(0, 100).trim();
 
   return {
     thread: {
@@ -896,8 +914,10 @@ export const make = Effect.gen(function* () {
     expected: ReturnType<typeof transcriptIdentity>,
     recordLimit: number,
     source: AgentSessionSource,
+    startOffset = 0,
+    isAppendRead = false,
   ) {
-    if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
+    if (!isAppendRead && expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
 
     return yield* Effect.scoped(
       fileSystem.open(filePath, { flag: "r" }).pipe(
@@ -906,13 +926,15 @@ export const make = Effect.gen(function* () {
             if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
               return null;
             }
+            if (startOffset > 0) yield* file.seek(BigInt(startOffset), "start");
             const records: Array<DecodedTranscriptRecord> = [];
             const recordOffsets: Array<number> = [];
             let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
-            let bytesRead = 0;
-            let recordStartOffset = 0;
+            let bytesRead = startOffset;
+            let recordStartOffset = startOffset;
+            let skipPartialOverlapRecord = startOffset > 0;
             const reserve = (bytes: number) => {
               recordBytes += bytes;
               if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
@@ -955,6 +977,14 @@ export const make = Effect.gen(function* () {
               const withinBudget = yield* Effect.try(() => {
                 let start = 0;
                 while (start < next.value.byteLength) {
+                  if (skipPartialOverlapRecord) {
+                    const newline = next.value.indexOf(10, start);
+                    if (newline === -1) break;
+                    skipPartialOverlapRecord = false;
+                    start = newline + 1;
+                    recordStartOffset = chunkOffset + start;
+                    continue;
+                  }
                   const newline = next.value.indexOf(10, start);
                   const end = newline === -1 ? next.value.byteLength : newline;
                   recordStarted = true;
@@ -1504,27 +1534,91 @@ export const make = Effect.gen(function* () {
             previousSource !== undefined && transcriptGrewByAppending(previousSource, identity)
               ? previousSource.size
               : undefined;
+          const readingAppend = appendFromByteOffset !== undefined;
+          const readStartOffset = readingAppend
+            ? Math.max(0, appendFromByteOffset - TRANSCRIPT_APPEND_OVERLAP_BYTES)
+            : 0;
+          const requestedBytes = identity.size - readStartOffset;
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
-            identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
-            identity.size > bytesRemaining
+            (!readingAppend && identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES) ||
+            requestedBytes > bytesRemaining
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          // Reserve the whole file even if its read or parse fails.
           transcriptsRemaining -= 1;
-          bytesRemaining -= identity.size;
-          const snapshot = yield* readTranscript(
+          bytesRemaining -= requestedBytes;
+          const recordLimit = recordsRemaining;
+          let snapshot = yield* readTranscript(
             transcript.filePath,
             identity,
-            recordsRemaining,
+            recordLimit,
             candidate.source,
+            readStartOffset,
+            readingAppend,
           );
           if (snapshot === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
           recordsRemaining -= snapshot.recordCount;
+
+          const transcriptMetadata: AgentSessionTranscriptMetadata = {
+            source: candidate.source,
+            providerInstanceId: candidate.providerInstanceId,
+            fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
+            ...(readingAppend && previousSource !== undefined
+              ? { previousProviderSessionId: previousSource.providerSessionId }
+              : {}),
+            lastActiveAtMs,
+          };
+          let parsedResult = parseAgentSessionRecords(
+            transcriptMetadata,
+            snapshot.records,
+            snapshot.recordOffsets,
+            readingAppend,
+          );
+          if (parsedResult === null) {
+            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+          }
+
+          let usedAppendRead = readingAppend;
+          if (
+            readingAppend &&
+            previousSource !== undefined &&
+            parsedResult.thread.providerSessionId !== previousSource.providerSessionId
+          ) {
+            const fallbackBytes = identity.size - requestedBytes;
+            if (identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES || fallbackBytes > bytesRemaining) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            bytesRemaining -= fallbackBytes;
+            const fullSnapshot = yield* readTranscript(
+              transcript.filePath,
+              identity,
+              recordLimit,
+              candidate.source,
+            );
+            if (fullSnapshot === null) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            snapshot = fullSnapshot;
+            recordsRemaining = recordLimit - fullSnapshot.recordCount;
+            parsedResult = parseAgentSessionRecords(
+              {
+                source: candidate.source,
+                providerInstanceId: candidate.providerInstanceId,
+                fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
+                lastActiveAtMs,
+              },
+              fullSnapshot.records,
+              fullSnapshot.recordOffsets,
+            );
+            if (parsedResult === null) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            usedAppendRead = false;
+          }
 
           // A stable replacement file can belong to a different project than the cached candidate.
           let snapshotCwd: string | null = null;
@@ -1532,33 +1626,21 @@ export const make = Effect.gen(function* () {
             snapshotCwd = extractDecodedCwd(record);
             if (snapshotCwd !== null) break;
           }
-          if (snapshotCwd === null) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
-          const expandedCwd = expandHomePath(snapshotCwd.trim());
-          if (
-            !path.isAbsolute(expandedCwd) ||
-            (yield* directoryIdentity(path.resolve(expandedCwd))) !== rootIdentity
-          ) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+          if (!usedAppendRead) {
+            if (snapshotCwd === null) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const expandedCwd = expandHomePath(snapshotCwd.trim());
+            if (
+              !path.isAbsolute(expandedCwd) ||
+              (yield* directoryIdentity(path.resolve(expandedCwd))) !== rootIdentity
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
           }
 
-          const parsedResult = parseAgentSessionRecords(
-            {
-              source: candidate.source,
-              providerInstanceId: candidate.providerInstanceId,
-              fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
-              lastActiveAtMs,
-            },
-            snapshot.records,
-            snapshot.recordOffsets,
-            appendFromByteOffset !== undefined,
-          );
-          if (parsedResult === null) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
           const matchesPreviousSession =
-            appendFromByteOffset !== undefined &&
+            usedAppendRead &&
             previousSource?.providerSessionId === parsedResult.thread.providerSessionId;
           const parsed = matchesPreviousSession
             ? parsedResult
@@ -1580,7 +1662,9 @@ export const make = Effect.gen(function* () {
             _tag: "Importable",
             thread: parsedThread,
             source,
-            ...(matchesPreviousSession ? { appendFromByteOffset } : {}),
+            ...(matchesPreviousSession && appendFromByteOffset !== undefined
+              ? { appendFromByteOffset }
+              : {}),
             messageOffsets: parsed.messageOffsets,
           });
         }).pipe(importReadLock.withPermits(1)),
