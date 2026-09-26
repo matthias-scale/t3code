@@ -173,6 +173,8 @@ export type AgentSessionRecentThread =
       readonly _tag: "Importable";
       readonly thread: AgentSessionThread;
       readonly source: AgentSessionImportSource;
+      readonly appendFromByteOffset?: number;
+      readonly messageOffsets?: ReadonlyArray<number>;
     }
   | { readonly _tag: "AlreadyImported"; readonly source: AgentSessionImportSource }
   | { readonly _tag: "Duplicate"; readonly source: AgentSessionImportSource }
@@ -192,6 +194,7 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      importedOnly?: boolean,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -291,14 +294,46 @@ export function parseAgentSessionTranscript(
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
-  const records = lines.flatMap((line) => Option.toArray(decodeTranscriptRecord(line)));
-  return parseAgentSessionRecords(input, records);
+  const records: Array<DecodedTranscriptRecord> = [];
+  const offsets: Array<number> = [];
+  const encoder = new TextEncoder();
+  let offset = 0;
+  for (const line of lines) {
+    const decoded = decodeTranscriptRecord(line);
+    if (Option.isSome(decoded)) {
+      records.push(decoded.value);
+      offsets.push(offset);
+    }
+    offset += encoder.encode(line).byteLength + 1;
+  }
+  return parseAgentSessionRecords(input, records, offsets)?.thread ?? null;
+}
+
+interface ParsedAgentSessionTranscript {
+  readonly thread: AgentSessionThread;
+  readonly messageOffsets: ReadonlyArray<number>;
+}
+
+function retainImportedHistoryCap(
+  parsed: ParsedAgentSessionTranscript,
+): ParsedAgentSessionTranscript {
+  if (parsed.thread.messages.length <= MAX_IMPORTED_MESSAGES) return parsed;
+  const keepFrom = parsed.thread.messages.length - (MAX_IMPORTED_MESSAGES - 1);
+  return {
+    thread: {
+      ...parsed.thread,
+      messages: [parsed.thread.messages[0]!, ...parsed.thread.messages.slice(keepFrom)],
+    },
+    messageOffsets: [parsed.messageOffsets[0]!, ...parsed.messageOffsets.slice(keepFrom)],
+  };
 }
 
 function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
-): AgentSessionThread | null {
+  recordOffsets: ReadonlyArray<number>,
+  retainAllMessages = false,
+): ParsedAgentSessionTranscript | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
@@ -306,9 +341,15 @@ function parseAgentSessionRecords(
   let title: string | null = null;
   let model: string | null = null;
   let hasCodexSessionId = false;
-  const messages: Array<AgentSessionThreadMessage & { readonly codexResponseUser: boolean }> = [];
+  const messages: Array<{
+    readonly value: AgentSessionThreadMessage & { readonly codexResponseUser: boolean };
+    readonly offset: number;
+  }> = [];
   let firstUserMessage:
-    | (AgentSessionThreadMessage & { readonly codexResponseUser: boolean })
+    | {
+        readonly value: AgentSessionThreadMessage & { readonly codexResponseUser: boolean };
+        readonly offset: number;
+      }
     | undefined;
   // A Codex response item can include generated setup text beside the real
   // prompt. Suppress response-user records only when the shared turn ID and a
@@ -368,18 +409,20 @@ function parseAgentSessionRecords(
 
   const retainMessage = (
     message: AgentSessionThreadMessage & { readonly codexResponseUser: boolean },
+    recordIndex: number,
   ) => {
+    const retained = { value: message, offset: recordOffsets[recordIndex] ?? 0 };
     if (firstUserMessage === undefined && message.role === "user") {
-      firstUserMessage = message;
+      firstUserMessage = retained;
     }
-    messages.push(message);
-    if (messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
+    messages.push(retained);
+    if (!retainAllMessages && messages.length > MAX_IMPORTED_MESSAGES) messages.shift();
   };
 
   const hasMatchingCodexEventInTurn = (text: string) => {
     const comparisonText = text.trim();
     for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
+      const message = messages[index]?.value;
       if (message?.role === "assistant") return false;
       if (
         message?.role === "user" &&
@@ -415,12 +458,15 @@ function parseAgentSessionRecords(
 
       const text = extractText(record.message?.content);
       if (text.length === 0) continue;
-      retainMessage({
-        role: record.type,
-        text,
-        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
-        codexResponseUser: false,
-      });
+      retainMessage(
+        {
+          role: record.type,
+          text,
+          createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+          codexResponseUser: false,
+        },
+        recordIndex,
+      );
       continue;
     }
 
@@ -443,20 +489,23 @@ function parseAgentSessionRecords(
       // Remove only the matching response copy so mixed-format logs keep every
       // distinct user message.
       for (let index = messages.length - 1; index >= 0; index--) {
-        const message = messages[index];
+        const message = messages[index]?.value;
         if (message?.role === "assistant") break;
         if (message?.codexResponseUser === true && message.text.trim() === text.trim()) {
-          if (firstUserMessage === message) firstUserMessage = undefined;
+          if (firstUserMessage === messages[index]) firstUserMessage = undefined;
           messages.splice(index, 1);
           break;
         }
       }
-      retainMessage({
-        role: "user",
-        text,
-        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
-        codexResponseUser: false,
-      });
+      retainMessage(
+        {
+          role: "user",
+          text,
+          createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+          codexResponseUser: false,
+        },
+        recordIndex,
+      );
       continue;
     }
     if (
@@ -475,34 +524,47 @@ function parseAgentSessionRecords(
     if (record.payload.role === "user" && hasMatchingCodexEventInTurn(extractedText)) {
       continue;
     }
-    retainMessage({
-      role: record.payload.role,
-      text: extractedText,
-      createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
-      codexResponseUser: record.payload.role === "user",
-    });
+    retainMessage(
+      {
+        role: record.payload.role,
+        text: extractedText,
+        createdAt: normalizeTimestamp(record.timestamp, fallbackTimestamp),
+        codexResponseUser: record.payload.role === "user",
+      },
+      recordIndex,
+    );
   }
 
   const visibleMessages = messages.map(
-    ({ codexResponseUser: _codexResponseUser, ...message }) => message,
+    ({ value: { codexResponseUser: _codexResponseUser, ...message } }) => message,
   );
   if (providerSessionId.trim().length === 0 || firstUserMessage === undefined) return null;
   const firstUserMessageRetained = messages.includes(firstUserMessage);
-  const { codexResponseUser: _codexResponseUser, ...visibleFirstUserMessage } = firstUserMessage;
+  const { codexResponseUser: _codexResponseUser, ...visibleFirstUserMessage } =
+    firstUserMessage.value;
   const retainedMessages = firstUserMessageRetained
     ? visibleMessages
     : [visibleFirstUserMessage, ...visibleMessages.slice(-(MAX_IMPORTED_MESSAGES - 1))];
+  const retainedOffsets = firstUserMessageRetained
+    ? messages.map((message) => message.offset)
+    : [
+        firstUserMessage.offset,
+        ...messages.slice(-(MAX_IMPORTED_MESSAGES - 1)).map((message) => message.offset),
+      ];
   const derivedTitle = visibleFirstUserMessage.text.trim().split("\n")[0]?.slice(0, 100).trim();
 
   return {
-    source: input.source,
-    providerInstanceId: input.providerInstanceId,
-    providerSessionId,
-    title: title ?? (derivedTitle && derivedTitle.length > 0 ? derivedTitle : "Imported thread"),
-    model,
-    createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
-    updatedAt: fallbackTimestamp,
-    messages: retainedMessages,
+    thread: {
+      source: input.source,
+      providerInstanceId: input.providerInstanceId,
+      providerSessionId,
+      title: title ?? (derivedTitle && derivedTitle.length > 0 ? derivedTitle : "Imported thread"),
+      model,
+      createdAt: retainedMessages[0]?.createdAt ?? fallbackTimestamp,
+      updatedAt: fallbackTimestamp,
+      messages: retainedMessages,
+    },
+    messageOffsets: retainedOffsets,
   };
 }
 
@@ -612,6 +674,21 @@ function sameTranscriptIdentity(
     left.device === right.device &&
     left.inode === right.inode &&
     left.birthtimeMs === right.birthtimeMs
+  );
+}
+
+function transcriptGrewByAppending(
+  previous: AgentSessionImportSource,
+  current: ReturnType<typeof transcriptIdentity>,
+): boolean {
+  return (
+    previous.filePath === current.filePath &&
+    previous.size < current.size &&
+    previous.device === current.device &&
+    (previous.inode === null || current.inode === null || previous.inode === current.inode) &&
+    (previous.birthtimeMs === null ||
+      current.birthtimeMs === null ||
+      previous.birthtimeMs === current.birthtimeMs)
   );
 }
 
@@ -830,10 +907,12 @@ export const make = Effect.gen(function* () {
               return null;
             }
             const records: Array<DecodedTranscriptRecord> = [];
+            const recordOffsets: Array<number> = [];
             let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
             let bytesRead = 0;
+            let recordStartOffset = 0;
             const reserve = (bytes: number) => {
               recordBytes += bytes;
               if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
@@ -853,6 +932,7 @@ export const make = Effect.gen(function* () {
               const decoded = decodeTranscriptValue(reader.finish());
               if (Option.isSome(decoded) && shouldRetainDecodedRecord(source, decoded.value)) {
                 records.push(decoded.value);
+                recordOffsets.push(recordStartOffset);
                 historyBytes += recordBytes;
               }
               recordBytes = 0;
@@ -870,6 +950,7 @@ export const make = Effect.gen(function* () {
                 return null;
               }
 
+              const chunkOffset = bytesRead;
               bytesRead += next.value.byteLength;
               const withinBudget = yield* Effect.try(() => {
                 let start = 0;
@@ -881,6 +962,7 @@ export const make = Effect.gen(function* () {
                   if (newline === -1) break;
                   if (!finishRecord()) return false;
                   start = newline + 1;
+                  recordStartOffset = chunkOffset + start;
                 }
                 return true;
               });
@@ -889,7 +971,7 @@ export const make = Effect.gen(function* () {
 
             if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
-              ? { records, recordCount }
+              ? { records, recordOffsets, recordCount }
               : null;
           }),
         ),
@@ -1328,6 +1410,7 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    importedOnly: boolean,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1335,6 +1418,10 @@ export const make = Effect.gen(function* () {
     const rootIdentity = yield* directoryIdentity(root);
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     const cutoffMs = nowMs - RECENT_THREAD_WINDOW_MS;
+    const completedByFile = Map.groupBy(
+      completedSources,
+      (source) => `${source.providerInstanceId}\0${source.filePath}`,
+    );
 
     const candidates = cachedCandidates ?? (yield* collectCandidates()).candidates;
     cachedCandidates = candidates;
@@ -1350,16 +1437,22 @@ export const make = Effect.gen(function* () {
       if ((yield* directoryIdentity(resolved)) !== rootIdentity) continue;
 
       for (const transcript of candidate.transcripts) {
+        const completed = completedByFile.get(
+          `${candidate.providerInstanceId}\0${transcript.filePath}`,
+        );
+        const alreadyImported = completed?.some((source) => source.provider === candidate.source);
+        if (importedOnly && alreadyImported !== true) continue;
         if (
-          transcript.mtimeMs === null ||
-          transcript.mtimeMs < cutoffMs ||
-          transcript.mtimeMs > nowMs
+          alreadyImported !== true &&
+          (transcript.mtimeMs === null ||
+            transcript.mtimeMs < cutoffMs ||
+            transcript.mtimeMs > nowMs)
         ) {
           continue;
         }
         eligibleTranscripts.push({
           candidate,
-          transcript: { ...transcript, mtimeMs: transcript.mtimeMs },
+          transcript: { ...transcript, mtimeMs: transcript.mtimeMs ?? nowMs },
         });
       }
     }
@@ -1371,10 +1464,6 @@ export const make = Effect.gen(function* () {
       return left.transcript.filePath.localeCompare(right.transcript.filePath);
     });
 
-    const completedByFile = Map.groupBy(
-      completedSources,
-      (source) => `${source.providerInstanceId}\0${source.filePath}`,
-    );
     const importedSessions = new Set<string>();
     let bytesRemaining = MAX_IMPORT_BYTES;
     let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
@@ -1396,6 +1485,7 @@ export const make = Effect.gen(function* () {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
           const identity = transcriptIdentity(transcript.filePath, stats.value);
+          const lastActiveAtMs = identity.mtimeMs ?? transcript.mtimeMs;
           const completedSource = completed?.find(
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
@@ -1409,6 +1499,11 @@ export const make = Effect.gen(function* () {
               source: completedSource,
             });
           }
+          const previousSource = completed?.find((source) => source.provider === candidate.source);
+          const appendFromByteOffset =
+            previousSource !== undefined && transcriptGrewByAppending(previousSource, identity)
+              ? previousSource.size
+              : undefined;
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
@@ -1448,18 +1543,27 @@ export const make = Effect.gen(function* () {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
 
-          const parsedThread = parseAgentSessionRecords(
+          const parsedResult = parseAgentSessionRecords(
             {
               source: candidate.source,
               providerInstanceId: candidate.providerInstanceId,
               fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
-              lastActiveAtMs: transcript.mtimeMs,
+              lastActiveAtMs,
             },
             snapshot.records,
+            snapshot.recordOffsets,
+            appendFromByteOffset !== undefined,
           );
-          if (parsedThread === null) {
+          if (parsedResult === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
+          const matchesPreviousSession =
+            appendFromByteOffset !== undefined &&
+            previousSource?.providerSessionId === parsedResult.thread.providerSessionId;
+          const parsed = matchesPreviousSession
+            ? parsedResult
+            : retainImportedHistoryCap(parsedResult);
+          const parsedThread = parsed.thread;
 
           const source: AgentSessionImportSource = {
             ...identity,
@@ -1476,6 +1580,8 @@ export const make = Effect.gen(function* () {
             _tag: "Importable",
             thread: parsedThread,
             source,
+            ...(matchesPreviousSession ? { appendFromByteOffset } : {}),
+            messageOffsets: parsed.messageOffsets,
           });
         }).pipe(importReadLock.withPermits(1)),
       ),
@@ -1487,7 +1593,8 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    importedOnly = false,
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, importedOnly));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

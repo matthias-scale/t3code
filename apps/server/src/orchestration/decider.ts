@@ -2006,29 +2006,39 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const existingImportedHistory =
+        thread.messages.length > 0 &&
+        thread.messages.every((message) => isImportedAgentSessionMessageId(message.id));
       if (
         thread.deletedAt !== null ||
         thread.archivedAt !== null ||
-        thread.messages.length > 0 ||
+        (thread.messages.length > 0 && !existingImportedHistory) ||
         thread.latestTurn !== null ||
         thread.session !== null ||
-        openRequests(thread).size > 0
+        openRequests(thread).size > 0 ||
+        command.messages.some((message) => !isImportedAgentSessionMessageId(message.messageId))
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Thread '${command.threadId}' must be active and empty before history can be imported.`,
+          detail: `Thread '${command.threadId}' must be active and empty or contain only imported history before more history can be imported.`,
         });
       }
-      const firstMessage = command.messages[0];
+      const existingMessageIds = new Set(thread.messages.map((message) => message.id));
+      const messages = command.messages.filter((message) => {
+        if (existingMessageIds.has(message.messageId)) return false;
+        existingMessageIds.add(message.messageId);
+        return true;
+      });
+      const firstMessage = messages[0];
       if (firstMessage === undefined) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "Thread history imports require at least one message.",
+          detail: "Thread history already contains every imported message in this command.",
         });
       }
 
       const events: Array<PlannedOrchestrationEvent> = [];
-      for (const message of command.messages) {
+      for (const message of messages) {
         events.push({
           ...(yield* withEventBase({
             aggregateKind: "thread",
@@ -2050,10 +2060,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      const settledAt = command.messages.reduce(
+      const settledAt = messages.reduce(
         (latest, message) =>
           compareDateTimeStrings(message.createdAt, latest) > 0 ? message.createdAt : latest,
-        firstMessage.createdAt,
+        thread.settledAt ?? firstMessage.createdAt,
       );
       events.push({
         ...(yield* withEventBase({

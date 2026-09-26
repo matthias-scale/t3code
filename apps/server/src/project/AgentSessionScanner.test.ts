@@ -1957,6 +1957,102 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("finds only appended visible messages after a capped imported history", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-follow-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-follow-codex-");
+        const workspace = yield* makeTempDir("t3code-follow-workspace-");
+        const filePath = path.join(claudeHomePath, "projects", "-follow", "session-follow.jsonl");
+        const initialRecords = [
+          {
+            type: "user",
+            cwd: workspace,
+            sessionId: "session-follow",
+            timestamp: "2026-08-24T10:00:00.000Z",
+            message: { role: "user", content: "Original prompt" },
+          },
+          ...Array.from({ length: 200 }, (_, index) => ({
+            type: "assistant",
+            sessionId: "session-follow",
+            timestamp: "2026-08-24T10:01:00.000Z",
+            message: { role: "assistant", content: `Old response ${index}` },
+          })),
+        ];
+        const initialContents = `${initialRecords
+          .map((record) => encodeTranscriptRecord(record))
+          .join("\n")}\n`;
+        yield* writeTranscript({ filePath, contents: initialContents, mtimeMs: nowMs });
+
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const initialOutcomes = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          const initial = initialOutcomes[0];
+          expect(initial?._tag).toBe("Importable");
+          if (initial?._tag !== "Importable") return;
+          expect(initial.thread.messages).toHaveLength(200);
+
+          const appendedRecords = [
+            {
+              type: "user",
+              sessionId: "session-follow",
+              timestamp: "2026-08-24T10:02:00.000Z",
+              message: { role: "user", content: "New prompt" },
+            },
+            {
+              type: "assistant",
+              sessionId: "session-follow",
+              timestamp: "2026-08-24T10:03:00.000Z",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "thinking", text: "private reasoning" },
+                  { type: "text", text: "New answer" },
+                ],
+              },
+            },
+            {
+              type: "tool_use",
+              sessionId: "session-follow",
+              message: { role: "assistant", content: "tool call" },
+            },
+          ];
+          const grownAt = nowMs + 31 * 24 * 60 * 60 * 1_000;
+          yield* TestClock.setTime(grownAt);
+          yield* fileSystem.writeFileString(
+            filePath,
+            `${appendedRecords
+              .map((record) => encodeTranscriptRecord(record))
+              .join("\n")}\n{malformed\n`,
+            { flag: "a" },
+          );
+          yield* fileSystem.utimes(filePath, (grownAt + 1_000) / 1_000, (grownAt + 1_000) / 1_000);
+
+          const grownOutcomes = yield* scanner
+            .recentThreads(workspace, [initial.source])
+            .pipe(Stream.runCollect);
+          const grown = grownOutcomes[0];
+          expect(grown?._tag).toBe("Importable");
+          if (grown?._tag !== "Importable") return;
+          expect(grown.appendFromByteOffset).toBe(initial.source.size);
+          expect(grown.thread.messages).toHaveLength(203);
+          expect(
+            grown.thread.messages.flatMap((message, index) =>
+              (grown.messageOffsets?.[index] ?? -1) >= initial.source.size ? [message.text] : [],
+            ),
+          ).toEqual(["New prompt", "New answer"]);
+
+          const unchanged = yield* scanner
+            .recentThreads(workspace, [grown.source])
+            .pipe(Stream.runCollect);
+          expect(unchanged[0]?._tag).toBe("AlreadyImported");
+        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+      }),
+    );
+
     it.effect("imports visible history from a transcript with an oversized tool record", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

@@ -174,6 +174,102 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
     }),
   );
 
+  it.effect("appends a repeated transcript update once and preserves prior messages", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const threadId = ThreadId.make("import:codex:session-follow");
+      const commandId = CommandId.make("command-follow-transcript");
+      const withThread = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-follow-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-thread-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-created"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "Imported thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const readModel = yield* projectEvent(withThread, {
+        sequence: 2,
+        eventId: EventId.make("event-follow-existing-message"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-existing-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-existing-message"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          messageId: MessageId.make(`${threadId}:000000`),
+          role: "user",
+          text: "Original prompt",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const previousMessage = readModel.threads[0]?.messages[0];
+      const command = {
+        type: "thread.history.import" as const,
+        commandId,
+        threadId,
+        messages: [
+          {
+            messageId: MessageId.make(`${threadId}:transcript:64`),
+            role: "assistant" as const,
+            text: "Follow-up answer",
+            createdAt: "2026-08-24T10:01:00.000Z",
+          },
+        ],
+      };
+      const events = yield* decideOrchestrationCommand({ command, readModel });
+      const plannedEvents = Array.isArray(events) ? events : [events];
+      let projected = readModel;
+      for (const [index, event] of plannedEvents.entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 3 });
+      }
+
+      expect(plannedEvents).toMatchObject([
+        {
+          type: "thread.message-sent",
+          payload: { messageId: `${threadId}:transcript:64`, text: "Follow-up answer" },
+        },
+        { type: "thread.settled" },
+      ]);
+      expect(projected.threads[0]?.messages[0]).toEqual(previousMessage);
+      expect(projected.threads[0]?.messages.map((message) => message.id)).toEqual([
+        `${threadId}:000000`,
+        `${threadId}:transcript:64`,
+      ]);
+
+      const repeated = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: { ...command, commandId: CommandId.make("command-follow-transcript-again") },
+          readModel: projected,
+        }),
+      );
+      expect(repeated.message).toContain("already contains every imported message");
+      expect(projected.threads[0]?.messages).toHaveLength(2);
+    }),
+  );
+
   it.effect("allows a thread with a newly imported user message to be settled", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:00:00.000Z";
