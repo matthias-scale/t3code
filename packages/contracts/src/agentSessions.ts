@@ -13,6 +13,8 @@ export const AgentSessionImportSource = Schema.Struct({
   providerSessionId: TrimmedNonEmptyString,
   filePath: TrimmedNonEmptyString,
   size: NonNegativeInt,
+  /** End of the last complete record; incomplete trailing data does not advance it. */
+  lastCompleteByteOffset: Schema.optional(NonNegativeInt),
   mtimeMs: Schema.NullOr(Schema.Number),
   device: Schema.Number,
   inode: Schema.NullOr(Schema.Number),

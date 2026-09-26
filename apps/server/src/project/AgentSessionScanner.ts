@@ -935,6 +935,7 @@ export const make = Effect.gen(function* () {
             let bytesRead = startOffset;
             let recordStartOffset = startOffset;
             let skipPartialOverlapRecord = startOffset > 0;
+            let trailingRecordWasValid = false;
             const reserve = (bytes: number) => {
               recordBytes += bytes;
               if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
@@ -952,6 +953,7 @@ export const make = Effect.gen(function* () {
               recordCount += 1;
               if (recordCount > recordLimit) return false;
               const decoded = decodeTranscriptValue(reader.finish());
+              trailingRecordWasValid = Option.isSome(decoded);
               if (Option.isSome(decoded) && shouldRetainDecodedRecord(source, decoded.value)) {
                 records.push(decoded.value);
                 recordOffsets.push(recordStartOffset);
@@ -999,9 +1001,17 @@ export const make = Effect.gen(function* () {
               if (!withinBudget) return null;
             }
 
-            if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
+            const hasUnterminatedTail = recordStarted;
+            if (hasUnterminatedTail && !(yield* Effect.try(finishRecord))) return null;
+            const lastCompleteByteOffset =
+              hasUnterminatedTail && !trailingRecordWasValid ? recordStartOffset : expected.size;
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
-              ? { records, recordOffsets, recordCount }
+              ? {
+                  records,
+                  recordOffsets,
+                  recordCount,
+                  lastCompleteByteOffset,
+                }
               : null;
           }),
         ),
@@ -1530,9 +1540,13 @@ export const make = Effect.gen(function* () {
             });
           }
           const previousSource = completed?.find((source) => source.provider === candidate.source);
+          const previousCompleteByteOffset =
+            previousSource?.lastCompleteByteOffset ?? previousSource?.size;
           const appendFromByteOffset =
-            previousSource !== undefined && transcriptGrewByAppending(previousSource, identity)
-              ? previousSource.size
+            previousSource !== undefined &&
+            previousCompleteByteOffset !== undefined &&
+            transcriptGrewByAppending(previousSource, identity)
+              ? previousCompleteByteOffset
               : undefined;
           const readingAppend = appendFromByteOffset !== undefined;
           const readStartOffset = readingAppend
@@ -1649,6 +1663,13 @@ export const make = Effect.gen(function* () {
 
           const source: AgentSessionImportSource = {
             ...identity,
+            lastCompleteByteOffset: Math.max(
+              parsedResult.thread.providerSessionId === previousSource?.providerSessionId &&
+                usedAppendRead
+                ? (previousCompleteByteOffset ?? 0)
+                : 0,
+              snapshot.lastCompleteByteOffset,
+            ),
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,

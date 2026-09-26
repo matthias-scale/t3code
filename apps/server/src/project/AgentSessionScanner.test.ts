@@ -2053,6 +2053,108 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("resumes a half-written record at the last complete newline", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-follow-partial-claude-");
+        const codexHomePath = yield* makeTempDir("t3code-follow-partial-codex-");
+        const workspace = yield* makeTempDir("t3code-follow-partial-workspace-");
+        const filePath = path.join(
+          claudeHomePath,
+          "projects",
+          "-follow-partial",
+          "session-follow-partial.jsonl",
+        );
+        const firstRecord = `${encodeTranscriptRecord({
+          type: "user",
+          cwd: workspace,
+          sessionId: "session-follow-partial",
+          timestamp: "2026-08-24T10:00:00.000Z",
+          message: { role: "user", content: "Original prompt" },
+        })}\n`;
+        const completedRecord = encodeTranscriptRecord({
+          type: "assistant",
+          sessionId: "session-follow-partial",
+          timestamp: "2026-08-24T10:01:00.000Z",
+          message: { role: "assistant", content: "Finished answer" },
+        });
+        const splitAt = Math.floor(completedRecord.length / 2);
+        const partialRecord = completedRecord.slice(0, splitAt);
+        yield* writeTranscript({
+          filePath,
+          contents: firstRecord + partialRecord,
+          mtimeMs: nowMs,
+        });
+
+        let transcriptOpens = 0;
+        const observedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          open: (openedPath, options) => {
+            if (openedPath === filePath) transcriptOpens += 1;
+            return fileSystem.open(openedPath, options);
+          },
+        });
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const initialOutcomes = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          const initial = initialOutcomes[0];
+          expect(initial?._tag).toBe("Importable");
+          if (initial?._tag !== "Importable") return;
+          expect(initial.thread.messages.map((message) => message.text)).toEqual([
+            "Original prompt",
+          ]);
+          expect(initial.source.size).toBe(
+            new TextEncoder().encode(firstRecord + partialRecord).length,
+          );
+          expect(initial.source.lastCompleteByteOffset).toBe(
+            new TextEncoder().encode(firstRecord).length,
+          );
+
+          transcriptOpens = 0;
+          const unchangedPartial = yield* scanner
+            .recentThreads(workspace, [initial.source])
+            .pipe(Stream.runCollect);
+          expect(unchangedPartial[0]?._tag).toBe("AlreadyImported");
+          expect(transcriptOpens).toBe(0);
+
+          const grownAt = nowMs + 1_000;
+          yield* fileSystem.writeFileString(filePath, `${completedRecord.slice(splitAt)}\n`, {
+            flag: "a",
+          });
+          yield* fileSystem.utimes(filePath, grownAt / 1_000, grownAt / 1_000);
+          const completedOutcomes = yield* scanner
+            .recentThreads(workspace, [initial.source])
+            .pipe(Stream.runCollect);
+          const completed = completedOutcomes[0];
+          expect(completed?._tag).toBe("Importable");
+          if (completed?._tag !== "Importable") return;
+          const appendFrom = new TextEncoder().encode(firstRecord).length;
+          expect(completed.appendFromByteOffset).toBe(appendFrom);
+          expect(completed.source.lastCompleteByteOffset).toBe(completed.source.size);
+          expect(
+            completed.thread.messages.flatMap((message, index) =>
+              (completed.messageOffsets?.[index] ?? -1) >= appendFrom ? [message.text] : [],
+            ),
+          ).toEqual(["Finished answer"]);
+
+          transcriptOpens = 0;
+          for (let poll = 0; poll < 2; poll += 1) {
+            const unchanged = yield* scanner
+              .recentThreads(workspace, [completed.source])
+              .pipe(Stream.runCollect);
+            expect(unchanged[0]?._tag).toBe("AlreadyImported");
+          }
+          expect(transcriptOpens).toBe(0);
+        }).pipe(
+          Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+          Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+        );
+      }),
+    );
+
     it.effect(
       "reads a grown transcript from its recorded offset beyond the history byte budget",
       () =>
