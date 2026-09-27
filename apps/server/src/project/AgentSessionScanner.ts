@@ -296,11 +296,22 @@ export function parseAgentSessionTranscript(
   },
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
+  return parseAgentSessionTranscriptRecords(input, lines)?.thread ?? null;
+}
+
+export function parseAgentSessionTranscriptRecords(
+  input: AgentSessionTranscriptMetadata & {
+    readonly contents: string;
+    readonly startByteOffset?: number;
+  },
+  lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
+  appendRead = false,
+): ParsedAgentSessionTranscript | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
   const records: Array<DecodedTranscriptRecord> = [];
   const offsets: Array<number> = [];
   const encoder = new TextEncoder();
-  let offset = 0;
+  let offset = input.startByteOffset ?? 0;
   for (const line of lines) {
     const decoded = decodeTranscriptRecord(line);
     if (Option.isSome(decoded)) {
@@ -309,12 +320,14 @@ export function parseAgentSessionTranscript(
     }
     offset += encoder.encode(line).byteLength + 1;
   }
-  return parseAgentSessionRecords(input, records, offsets)?.thread ?? null;
+  return parseAgentSessionRecords(input, records, offsets, appendRead);
 }
 
 interface ParsedAgentSessionTranscript {
   readonly thread: AgentSessionThread;
   readonly messageOffsets: ReadonlyArray<number>;
+  readonly lastAmbiguousCodexUserOffset?: number;
+  readonly codexEventMessageOffsets: ReadonlyArray<number>;
 }
 
 function retainImportedHistoryCap(
@@ -328,10 +341,13 @@ function retainImportedHistoryCap(
       messages: [parsed.thread.messages[0]!, ...parsed.thread.messages.slice(keepFrom)],
     },
     messageOffsets: [parsed.messageOffsets[0]!, ...parsed.messageOffsets.slice(keepFrom)],
+    codexEventMessageOffsets: parsed.codexEventMessageOffsets.filter((offset) =>
+      [parsed.messageOffsets[0], ...parsed.messageOffsets.slice(keepFrom)].includes(offset),
+    ),
   };
 }
 
-function parseAgentSessionRecords(
+export function parseAgentSessionRecords(
   input: AgentSessionTranscriptMetadata,
   records: ReadonlyArray<DecodedTranscriptRecord>,
   recordOffsets: ReadonlyArray<number>,
@@ -349,6 +365,7 @@ function parseAgentSessionRecords(
     readonly value: AgentSessionThreadMessage & { readonly codexResponseUser: boolean };
     readonly offset: number;
   }> = [];
+  const codexEventMessageOffsets: Array<number> = [];
   let firstUserMessage:
     | {
         readonly value: AgentSessionThreadMessage & { readonly codexResponseUser: boolean };
@@ -365,6 +382,7 @@ function parseAgentSessionRecords(
     readonly turnId: string;
     readonly text: string;
   }> = [];
+  let finalCodexTurnResponseUsers: typeof responseUsersInTurn = [];
   const finishCodexTurn = () => {
     const canonicalTurnIds = new Set(
       responseUsersInTurn.flatMap((responseUser) =>
@@ -389,6 +407,7 @@ function parseAgentSessionRecords(
         record.payload.role === "assistant"
       ) {
         finishCodexTurn();
+        finalCodexTurnResponseUsers = [];
         continue;
       }
       if (record.type === "event_msg" && record.payload?.type === "user_message") {
@@ -408,6 +427,7 @@ function parseAgentSessionRecords(
         }
       }
     }
+    finalCodexTurnResponseUsers = responseUsersInTurn;
     finishCodexTurn();
   }
 
@@ -489,6 +509,7 @@ function parseAgentSessionRecords(
     if (record.type === "event_msg" && record.payload?.type === "user_message") {
       const text = record.payload.message ?? "";
       if (text.trim().length === 0) continue;
+      codexEventMessageOffsets.push(recordOffsets[recordIndex] ?? 0);
       // Codex can write the same prompt as both a response item and an event.
       // Remove only the matching response copy so mixed-format logs keep every
       // distinct user message.
@@ -571,6 +592,14 @@ function parseAgentSessionRecords(
   }
   const derivedTitle = visibleFirstUserMessage?.text.trim().split("\n")[0]?.slice(0, 100).trim();
 
+  const lastAmbiguousCodexUserOffset = finalCodexTurnResponseUsers
+    .filter((responseUser) => !canonicalCodexResponseUserIndices.has(responseUser.index))
+    .map((responseUser) => recordOffsets[responseUser.index] ?? 0)
+    .reduce<number | undefined>(
+      (earliest, offset) => (earliest === undefined ? offset : Math.min(earliest, offset)),
+      undefined,
+    );
+
   return {
     thread: {
       source: input.source,
@@ -583,6 +612,8 @@ function parseAgentSessionRecords(
       messages: retainedMessages,
     },
     messageOffsets: retainedOffsets,
+    codexEventMessageOffsets,
+    ...(lastAmbiguousCodexUserOffset === undefined ? {} : { lastAmbiguousCodexUserOffset }),
   };
 }
 
@@ -1660,16 +1691,26 @@ export const make = Effect.gen(function* () {
             ? parsedResult
             : retainImportedHistoryCap(parsedResult);
           const parsedThread = parsed.thread;
+          const lastCompleteByteOffset = Math.max(
+            parsedResult.thread.providerSessionId === previousSource?.providerSessionId &&
+              usedAppendRead
+              ? (previousCompleteByteOffset ?? 0)
+              : 0,
+            snapshot.lastCompleteByteOffset,
+          );
 
           const source: AgentSessionImportSource = {
             ...identity,
-            lastCompleteByteOffset: Math.max(
-              parsedResult.thread.providerSessionId === previousSource?.providerSessionId &&
-                usedAppendRead
-                ? (previousCompleteByteOffset ?? 0)
-                : 0,
-              snapshot.lastCompleteByteOffset,
-            ),
+            lastCompleteByteOffset:
+              parsedResult.lastAmbiguousCodexUserOffset === undefined
+                ? lastCompleteByteOffset
+                : Math.max(
+                    parsedResult.thread.providerSessionId === previousSource?.providerSessionId &&
+                      usedAppendRead
+                      ? (previousCompleteByteOffset ?? 0)
+                      : 0,
+                    Math.min(lastCompleteByteOffset, parsedResult.lastAmbiguousCodexUserOffset),
+                  ),
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,

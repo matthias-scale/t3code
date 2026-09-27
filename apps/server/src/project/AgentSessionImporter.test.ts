@@ -63,6 +63,7 @@ import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import { importRecentAgentThreads } from "./AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+import { pollOnce as followImportedTranscriptsOnce } from "./AgentSessionTranscriptFollower.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const WORKSPACE_ROOT = "/tmp/project-from-server";
@@ -333,7 +334,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
-    it.effect("appends visible messages once with stable ids beyond the imported snapshot", () =>
+    it.effect("leaves changed imported transcripts for the dedicated follower", () =>
       Effect.gen(function* () {
         const baseThread = makeThread("codex");
         const threadId = ThreadId.make("import:codex:codex-session");
@@ -425,22 +426,12 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         const firstResult = yield* runFollow();
         const secondResult = yield* runFollow();
 
-        expect(firstResult).toEqual({ importedCount: 1, skippedCount: 0 });
-        expect(secondResult).toEqual({ importedCount: 1, skippedCount: 0 });
-        expect(commands).toHaveLength(1);
-        expect(commands[0]).toMatchObject({
-          type: "thread.history.import",
-          threadId,
-          messages: [
-            { messageId: `${threadId}:transcript:120`, text: "New prompt" },
-            { messageId: `${threadId}:transcript:140`, text: "New answer" },
-          ],
-        });
-        expect(recorded).toEqual([grownSource, grownSource]);
+        expect(firstResult).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(secondResult).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(commands).toHaveLength(0);
+        expect(recorded).toEqual([]);
         expect(projectedThread.messages.map((message) => message.id)).toEqual([
           `${threadId}:000000`,
-          `${threadId}:transcript:120`,
-          `${threadId}:transcript:140`,
         ]);
       }),
     );
@@ -902,6 +893,132 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       expect(Option.getOrThrow(afterRevert).messages.map((message) => message.text)).toEqual(
         integrationThread.messages.map((message) => message.text),
       );
+    }),
+  );
+
+  it.effect("reads equal-timestamp appended messages in transcript order from the projection", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const followerProjectId = ProjectId.make("follower-projection-order-project");
+      const followerWorkspaceRoot = "/tmp/follower-projection-order-workspace";
+      const followerSessionId = "99999999-9999-4999-8999-999999999999";
+      const threadId = ThreadId.make(`import:claudeAgent:${followerSessionId}`);
+      const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-follower-projection-order-",
+      });
+      const filePath = path.join(fixtureDir, "transcript.jsonl");
+      const initialRecord = encodeTranscriptRecord({
+        type: "user",
+        timestamp: "2026-08-24T10:00:00.000Z",
+        message: { content: "Original prompt" },
+      });
+      const initialContents = `${initialRecord}\n`;
+      yield* fileSystem.writeFileString(filePath, initialContents);
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("create-follower-projection-project"),
+        projectId: followerProjectId,
+        title: "Project",
+        workspaceRoot: followerWorkspaceRoot,
+        defaultModelSelection: null,
+        createdAt: "2026-08-24T09:00:00.000Z",
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-follower-projection-thread"),
+        threadId,
+        projectId: followerProjectId,
+        title: "Imported thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "default",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-08-24T10:00:00.000Z",
+        historyImport: true,
+      });
+      yield* engine.dispatch({
+        type: "thread.history.import",
+        commandId: CommandId.make("import-follower-projection-baseline"),
+        threadId,
+        messages: [
+          {
+            messageId: MessageId.make(`${threadId}:000000`),
+            role: "user",
+            text: "Original prompt",
+            createdAt: "2026-08-24T10:00:00.000Z",
+          },
+        ],
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        status: "stopped",
+        runtimeMode: "full-access",
+        resumeCursor: { threadId, resume: followerSessionId },
+        runtimePayload: { cwd: followerWorkspaceRoot },
+      });
+      const stats = yield* fileSystem.stat(filePath);
+      yield* directory.recordImportedTranscript({
+        threadId,
+        source: {
+          provider: "claudeAgent",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          providerSessionId: followerSessionId,
+          filePath,
+          size: Number(stats.size),
+          lastCompleteByteOffset: Number(stats.size),
+          mtimeMs: Option.match(stats.mtime, {
+            onNone: () => null,
+            onSome: (date) => date.getTime(),
+          }),
+          device: stats.dev,
+          inode: Option.getOrNull(stats.ino),
+          birthtimeMs: Option.match(stats.birthtime, {
+            onNone: () => null,
+            onSome: (date) => date.getTime(),
+          }),
+        } satisfies AgentSessionImportSource,
+      });
+
+      const equalTimestamp = "2026-08-24T10:01:00.000Z";
+      yield* fileSystem.writeFileString(
+        filePath,
+        `${[
+          encodeTranscriptRecord({
+            type: "user",
+            timestamp: equalTimestamp,
+            message: { content: "Appended prompt" },
+          }),
+          encodeTranscriptRecord({
+            type: "assistant",
+            timestamp: equalTimestamp,
+            message: { content: "Appended answer" },
+          }),
+        ].join("\n")}\n`,
+        { flag: "a" },
+      );
+
+      yield* followImportedTranscriptsOnce();
+      const readBack = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+      expect(readBack.messages.map((message) => message.text)).toEqual([
+        "Original prompt",
+        "Appended prompt",
+        "Appended answer",
+      ]);
+      expect(readBack.messages.slice(1).map((message) => message.createdAt)).toEqual([
+        equalTimestamp,
+        equalTimestamp,
+      ]);
     }),
   );
 

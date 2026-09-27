@@ -1511,6 +1511,84 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    it.effect("keeps an ambiguous Codex response prompt in the next import cursor", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const workspace = yield* makeTempDir("t3code-codex-workspace-");
+        const filePath = path.join(
+          codexHomePath,
+          "sessions",
+          "2026",
+          "08",
+          "24",
+          "rollout-ambiguous-prompt.jsonl",
+        );
+        const metadataRecord = encodeTranscriptRecord({
+          type: "session_meta",
+          payload: { id: "ambiguous-session", cwd: workspace },
+        });
+        const responsePromptRecord = encodeTranscriptRecord({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+            content: [{ type: "input_text", text: "Split prompt" }],
+          },
+        });
+        yield* writeTranscript({
+          filePath,
+          contents: `${metadataRecord}\n${responsePromptRecord}\n`,
+          mtimeMs: nowMs,
+        });
+
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          const initialOutcomes = yield* scanner.recentThreads(workspace).pipe(Stream.runCollect);
+          const initial = initialOutcomes[0];
+          expect(initial?._tag).toBe("Importable");
+          if (initial?._tag !== "Importable") return;
+          expect(initial.thread.messages.map((message) => message.text)).toEqual(["Split prompt"]);
+          const ambiguousPromptOffset = new TextEncoder().encode(`${metadataRecord}\n`).length;
+          expect(initial.source.lastCompleteByteOffset).toBe(ambiguousPromptOffset);
+
+          const appendedRecords = [
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: { type: "user_message", message: "Split prompt" },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "One answer" }],
+              },
+            }),
+          ];
+          yield* fileSystem.writeFileString(filePath, `${appendedRecords.join("\n")}\n`, {
+            flag: "a",
+          });
+          yield* fileSystem.utimes(filePath, (nowMs + 1_000) / 1_000, (nowMs + 1_000) / 1_000);
+          const followedOutcomes = yield* scanner
+            .recentThreads(workspace, [initial.source])
+            .pipe(Stream.runCollect);
+          const followed = followedOutcomes[0];
+          expect(followed?._tag).toBe("Importable");
+          if (followed?._tag !== "Importable") return;
+          expect(followed.thread.messages.map((message) => message.text)).toEqual([
+            "Split prompt",
+            "One answer",
+          ]);
+        }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+      }),
+    );
+
     it.effect("imports history recorded with a case alias", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

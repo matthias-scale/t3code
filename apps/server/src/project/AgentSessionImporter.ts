@@ -100,7 +100,6 @@ function hasImportBlockingActivity(
 /** Import recent transcript text and persist the cursor needed to resume its provider session. */
 const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
   input: AgentSessionImportInput,
-  importedThreadsOnly: boolean,
 ) {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
@@ -133,7 +132,6 @@ const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
   const threads = scanner.recentThreads(
     workspaceRoot,
     completedSources.map((entry) => entry.source),
-    importedThreadsOnly,
   );
   const importedThreadIds = new Set<ThreadId>();
   let importedCount = 0;
@@ -177,7 +175,6 @@ const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
           entry.source.providerInstanceId === outcome.source.providerInstanceId &&
           entry.source.filePath === outcome.source.filePath,
       );
-      if (importedThreadsOnly && recordedSource === undefined) return;
       const imported = yield* Effect.gen(function* () {
         const provider = ProviderDriverKind.make(thread.source);
         const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL;
@@ -215,37 +212,6 @@ const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
             existingBinding.value.status !== "stopped"
           ) {
             return false;
-          }
-          if (outcome.appendFromByteOffset !== undefined) {
-            if (recordedSource === undefined) return false;
-            const existingMessageIds = new Set(
-              existingThread.value.messages.map((message) => message.id),
-            );
-            const appendedMessages = thread.messages.flatMap((message, index) => {
-              const offset = outcome.messageOffsets?.[index];
-              if (offset === undefined || offset < outcome.appendFromByteOffset!) return [];
-              const messageId = MessageId.make(`${threadId}:transcript:${offset}`);
-              if (existingMessageIds.has(messageId)) return [];
-              existingMessageIds.add(messageId);
-              return [
-                {
-                  messageId,
-                  role: message.role,
-                  text: message.text,
-                  createdAt: message.createdAt,
-                },
-              ];
-            });
-            if (appendedMessages.length > 0) {
-              yield* engine.dispatch({
-                type: "thread.history.import",
-                commandId: CommandId.make(yield* crypto.randomUUIDv4),
-                threadId,
-                messages: appendedMessages,
-              });
-            }
-            yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
-            return true;
           }
           if (recordedSource !== undefined) return false;
           yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
@@ -346,8 +312,4 @@ const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
 });
 
 export const importRecentAgentThreads = (input: AgentSessionImportInput) =>
-  importAgentThreads(input, false);
-
-/** Recheck only transcript files already recorded on imported threads. */
-export const followImportedAgentThreads = (input: AgentSessionImportInput) =>
-  importAgentThreads(input, true);
+  importAgentThreads(input);

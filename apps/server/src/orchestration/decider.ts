@@ -2009,18 +2009,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const existingImportedHistory =
         thread.messages.length > 0 &&
         thread.messages.every((message) => isImportedAgentSessionMessageId(message.id));
+      const blockedByThreadState = existingImportedHistory
+        ? thread.latestTurn !== null ||
+          thread.session !== null ||
+          thread.messages.some((message) => !isImportedAgentSessionMessageId(message.id))
+        : thread.deletedAt !== null ||
+          thread.archivedAt !== null ||
+          thread.messages.length > 0 ||
+          thread.latestTurn !== null ||
+          thread.session !== null ||
+          openRequests(thread).size > 0;
       if (
-        thread.deletedAt !== null ||
-        thread.archivedAt !== null ||
-        (thread.messages.length > 0 && !existingImportedHistory) ||
-        thread.latestTurn !== null ||
-        thread.session !== null ||
-        openRequests(thread).size > 0 ||
+        blockedByThreadState ||
         command.messages.some((message) => !isImportedAgentSessionMessageId(message.messageId))
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Thread '${command.threadId}' must be active and empty or contain only imported history before more history can be imported.`,
+          detail: existingImportedHistory
+            ? `Thread '${command.threadId}' must have no T3 turn or session and contain only imported history before more history can be appended.`
+            : `Thread '${command.threadId}' must be active and empty before history can be imported.`,
         });
       }
       const existingMessageIds = new Set(thread.messages.map((message) => message.id));

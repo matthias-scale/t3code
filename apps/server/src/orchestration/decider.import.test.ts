@@ -255,11 +255,35 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
           updatedAt: "2026-08-24T10:00:30.000Z",
         },
       });
-      const previousMessage = readModelAfterUnsettle.threads[0]?.messages[0];
+      const readModelWithOpenRequest = yield* projectEvent(readModelAfterUnsettle, {
+        sequence: 5,
+        eventId: EventId.make("event-follow-open-request"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.activity-appended",
+        occurredAt: "2026-08-24T10:00:45.000Z",
+        commandId: CommandId.make("command-follow-open-request"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-open-request"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-follow-open-request"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Pending approval",
+            payload: { requestId: "pending-follow-request" },
+            turnId: null,
+            createdAt: "2026-08-24T10:00:45.000Z",
+          },
+        },
+      });
+      const previousMessage = readModelWithOpenRequest.threads[0]?.messages[0];
       const previousLifecycle = {
-        settledOverride: readModelAfterUnsettle.threads[0]?.settledOverride,
-        settledAt: readModelAfterUnsettle.threads[0]?.settledAt,
-        unsettledAt: readModelAfterUnsettle.threads[0]?.unsettledAt,
+        settledOverride: readModelWithOpenRequest.threads[0]?.settledOverride,
+        settledAt: readModelWithOpenRequest.threads[0]?.settledAt,
+        unsettledAt: readModelWithOpenRequest.threads[0]?.unsettledAt,
       };
       const command = {
         type: "thread.history.import" as const,
@@ -267,7 +291,7 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
         threadId,
         messages: [
           {
-            messageId: MessageId.make(`${threadId}:transcript:64`),
+            messageId: MessageId.make(`${threadId}:transcript:0000000000000064`),
             role: "assistant" as const,
             text: "Follow-up answer",
             createdAt: "2026-08-24T10:01:00.000Z",
@@ -276,25 +300,28 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
       };
       const events = yield* decideOrchestrationCommand({
         command,
-        readModel: readModelAfterUnsettle,
+        readModel: readModelWithOpenRequest,
       });
       const plannedEvents = Array.isArray(events) ? events : [events];
-      let projected = readModelAfterUnsettle;
+      let projected = readModelWithOpenRequest;
       for (const [index, event] of plannedEvents.entries()) {
-        projected = yield* projectEvent(projected, { ...event, sequence: index + 5 });
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 6 });
       }
 
       expect(plannedEvents).toMatchObject([
         {
           type: "thread.message-sent",
-          payload: { messageId: `${threadId}:transcript:64`, text: "Follow-up answer" },
+          payload: {
+            messageId: `${threadId}:transcript:0000000000000064`,
+            text: "Follow-up answer",
+          },
         },
       ]);
       expect(plannedEvents.some((event) => event.type === "thread.settled")).toBe(false);
       expect(projected.threads[0]?.messages[0]).toEqual(previousMessage);
       expect(projected.threads[0]?.messages.map((message) => message.id)).toEqual([
         `${threadId}:000000`,
-        `${threadId}:transcript:64`,
+        `${threadId}:transcript:0000000000000064`,
       ]);
       expect({
         settledOverride: projected.threads[0]?.settledOverride,
