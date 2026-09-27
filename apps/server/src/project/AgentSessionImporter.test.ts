@@ -436,6 +436,136 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
+    it.effect("reconciles new messages when the first source save failed", () =>
+      Effect.gen(function* () {
+        const originalThread = makeThread("codex");
+        const grownThread = {
+          ...originalThread,
+          messages: [
+            ...originalThread.messages,
+            {
+              role: "assistant" as const,
+              text: "Added after the first import",
+              createdAt: "2026-08-24T10:02:00.000Z",
+            },
+          ],
+        };
+        const initialSource = {
+          ...makeThreadOutcome(originalThread).source,
+          size: 100,
+        };
+        const threadId = ThreadId.make("import:codex:codex-session");
+        let scanCount = 0;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () =>
+            Stream.succeed(
+              makeImportableOutcome(scanCount++ === 0 ? originalThread : grownThread, {
+                source: { ...initialSource, size: scanCount === 1 ? 100 : 160 },
+              }),
+            ),
+        });
+        const commands: Array<OrchestrationCommand> = [];
+        let projectedThread: OrchestrationThread | undefined;
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              if (command.type === "thread.create") {
+                projectedThread = makeProjectedThread({ source: "codex", imported: false });
+              } else if (command.type === "thread.history.import") {
+                const base =
+                  projectedThread ?? makeProjectedThread({ source: "codex", imported: false });
+                projectedThread = {
+                  ...base,
+                  settledOverride: "settled",
+                  settledAt: command.messages.at(-1)?.createdAt ?? base.settledAt,
+                  messages: [
+                    ...base.messages,
+                    ...command.messages.map((message) => ({
+                      id: message.messageId,
+                      role: message.role,
+                      text: message.text,
+                      turnId: null,
+                      streaming: false,
+                      createdAt: message.createdAt,
+                      updatedAt: message.createdAt,
+                    })),
+                  ],
+                };
+              }
+              return { sequence: commands.length };
+            }),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        let binding: ProviderSessionDirectory.ProviderRuntimeBinding | undefined;
+        let sourceSaveFailures = 1;
+        let successfulSourceSaves = 0;
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: (nextBinding) =>
+            Effect.sync(() => {
+              binding = nextBinding;
+            }),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => {
+            if (sourceSaveFailures > 0) {
+              sourceSaveFailures -= 1;
+              return Effect.fail(
+                new ProviderSessionDirectoryPersistenceError({
+                  operation: "recordImportedTranscript",
+                  detail: "first source save failed",
+                }),
+              );
+            }
+            successfulSourceSaves += 1;
+            return Effect.void;
+          },
+          getBinding: () =>
+            Effect.succeed(binding === undefined ? Option.none() : Option.some(binding)),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+        const runAttempt = () =>
+          runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                projectedThread === undefined ? Option.none() : Option.some(projectedThread),
+            }),
+          });
+
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 1, skippedCount: 0 });
+
+        const importedHistoryCommands = commands.filter(
+          (command) => command.type === "thread.history.import",
+        );
+        expect(importedHistoryCommands).toHaveLength(2);
+        expect(importedHistoryCommands[0]).toMatchObject({
+          messages: [{ text: "Fix the bug" }, { text: "Fixed" }],
+        });
+        expect(importedHistoryCommands[1]).toMatchObject({
+          messages: [{ text: "Added after the first import" }],
+        });
+        expect(
+          projectedThread?.messages.filter(
+            (message) => message.text === "Added after the first import",
+          ),
+        ).toHaveLength(1);
+        expect(successfulSourceSaves).toBe(2);
+        expect(binding?.status).toBe("stopped");
+      }),
+    );
+
     it.effect("does not append again when the transcript snapshot is unchanged", () =>
       Effect.gen(function* () {
         const source = makeThreadOutcome(makeThread("codex")).source;
@@ -606,6 +736,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
 
     it.effect("recovers after a rejected history receipt and a failed binding write", () =>
       Effect.gen(function* () {
+        const threadId = ThreadId.make("import:codex:codex-session");
         let threadCreated = false;
         let historyImported = false;
         let historyAttemptCount = 0;
@@ -672,10 +803,32 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
-          getThread: () =>
-            threadCreated
-              ? Option.some(makeProjectedThread({ source: "codex", imported: historyImported }))
-              : Option.none(),
+          getThread: () => {
+            if (!threadCreated) return Option.none();
+            const projected = makeProjectedThread({
+              source: "codex",
+              imported: historyImported,
+            });
+            return Option.some(
+              historyImported
+                ? {
+                    ...projected,
+                    messages: [
+                      ...projected.messages,
+                      {
+                        id: MessageId.make(`${threadId}:000001`),
+                        role: "assistant",
+                        text: "Fixed",
+                        turnId: null,
+                        streaming: false,
+                        createdAt: "2026-08-24T10:01:00.000Z",
+                        updatedAt: "2026-08-24T10:01:00.000Z",
+                      },
+                    ],
+                  }
+                : projected,
+            );
+          },
         });
         const importOnce = () => runImport({ scanner, engine, directory, snapshots });
 
@@ -896,130 +1049,132 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
     }),
   );
 
-  it.effect("reads equal-timestamp appended messages in transcript order from the projection", () =>
-    Effect.gen(function* () {
-      const engine = yield* OrchestrationEngine.OrchestrationEngineService;
-      const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const followerProjectId = ProjectId.make("follower-projection-order-project");
-      const followerWorkspaceRoot = "/tmp/follower-projection-order-workspace";
-      const followerSessionId = "99999999-9999-4999-8999-999999999999";
-      const threadId = ThreadId.make(`import:claudeAgent:${followerSessionId}`);
-      const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
-        prefix: "t3-follower-projection-order-",
-      });
-      const filePath = path.join(fixtureDir, "transcript.jsonl");
-      const initialRecord = encodeTranscriptRecord({
-        type: "user",
-        timestamp: "2026-08-24T10:00:00.000Z",
-        message: { content: "Original prompt" },
-      });
-      const initialContents = `${initialRecord}\n`;
-      yield* fileSystem.writeFileString(filePath, initialContents);
+  it.effect(
+    "reads appended messages after existing history when transcript timestamps go back",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const followerProjectId = ProjectId.make("follower-projection-order-project");
+        const followerWorkspaceRoot = "/tmp/follower-projection-order-workspace";
+        const followerSessionId = "99999999-9999-4999-8999-999999999999";
+        const threadId = ThreadId.make(`import:claudeAgent:${followerSessionId}`);
+        const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-projection-order-",
+        });
+        const filePath = path.join(fixtureDir, "transcript.jsonl");
+        const initialRecord = encodeTranscriptRecord({
+          type: "user",
+          timestamp: "2026-08-24T10:00:00.000Z",
+          message: { content: "Original prompt" },
+        });
+        const initialContents = `${initialRecord}\n`;
+        yield* fileSystem.writeFileString(filePath, initialContents);
 
-      yield* engine.dispatch({
-        type: "project.create",
-        commandId: CommandId.make("create-follower-projection-project"),
-        projectId: followerProjectId,
-        title: "Project",
-        workspaceRoot: followerWorkspaceRoot,
-        defaultModelSelection: null,
-        createdAt: "2026-08-24T09:00:00.000Z",
-      });
-      yield* engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.make("create-follower-projection-thread"),
-        threadId,
-        projectId: followerProjectId,
-        title: "Imported thread",
-        modelSelection: {
-          instanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "default",
-        },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        createdAt: "2026-08-24T10:00:00.000Z",
-        historyImport: true,
-      });
-      yield* engine.dispatch({
-        type: "thread.history.import",
-        commandId: CommandId.make("import-follower-projection-baseline"),
-        threadId,
-        messages: [
-          {
-            messageId: MessageId.make(`${threadId}:000000`),
-            role: "user",
-            text: "Original prompt",
-            createdAt: "2026-08-24T10:00:00.000Z",
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("create-follower-projection-project"),
+          projectId: followerProjectId,
+          title: "Project",
+          workspaceRoot: followerWorkspaceRoot,
+          defaultModelSelection: null,
+          createdAt: "2026-08-24T09:00:00.000Z",
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-follower-projection-thread"),
+          threadId,
+          projectId: followerProjectId,
+          title: "Imported thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "default",
           },
-        ],
-      });
-      yield* directory.upsert({
-        threadId,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-        status: "stopped",
-        runtimeMode: "full-access",
-        resumeCursor: { threadId, resume: followerSessionId },
-        runtimePayload: { cwd: followerWorkspaceRoot },
-      });
-      const stats = yield* fileSystem.stat(filePath);
-      yield* directory.recordImportedTranscript({
-        threadId,
-        source: {
-          provider: "claudeAgent",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-08-24T10:00:00.000Z",
+          historyImport: true,
+        });
+        yield* engine.dispatch({
+          type: "thread.history.import",
+          commandId: CommandId.make("import-follower-projection-baseline"),
+          threadId,
+          messages: [
+            {
+              messageId: MessageId.make(`${threadId}:000000`),
+              role: "user",
+              text: "Original prompt",
+              createdAt: "2026-08-24T10:00:00.000Z",
+            },
+          ],
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
           providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          providerSessionId: followerSessionId,
+          status: "stopped",
+          runtimeMode: "full-access",
+          resumeCursor: { threadId, resume: followerSessionId },
+          runtimePayload: { cwd: followerWorkspaceRoot },
+        });
+        const stats = yield* fileSystem.stat(filePath);
+        yield* directory.recordImportedTranscript({
+          threadId,
+          source: {
+            provider: "claudeAgent",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            providerSessionId: followerSessionId,
+            filePath,
+            size: Number(stats.size),
+            lastCompleteByteOffset: Number(stats.size),
+            mtimeMs: Option.match(stats.mtime, {
+              onNone: () => null,
+              onSome: (date) => date.getTime(),
+            }),
+            device: stats.dev,
+            inode: Option.getOrNull(stats.ino),
+            birthtimeMs: Option.match(stats.birthtime, {
+              onNone: () => null,
+              onSome: (date) => date.getTime(),
+            }),
+          } satisfies AgentSessionImportSource,
+        });
+
+        const earlierTimestamp = "2026-08-24T09:00:00.000Z";
+        yield* fileSystem.writeFileString(
           filePath,
-          size: Number(stats.size),
-          lastCompleteByteOffset: Number(stats.size),
-          mtimeMs: Option.match(stats.mtime, {
-            onNone: () => null,
-            onSome: (date) => date.getTime(),
-          }),
-          device: stats.dev,
-          inode: Option.getOrNull(stats.ino),
-          birthtimeMs: Option.match(stats.birthtime, {
-            onNone: () => null,
-            onSome: (date) => date.getTime(),
-          }),
-        } satisfies AgentSessionImportSource,
-      });
+          `${[
+            encodeTranscriptRecord({
+              type: "user",
+              timestamp: earlierTimestamp,
+              message: { content: "Appended prompt" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              timestamp: earlierTimestamp,
+              message: { content: "Appended answer" },
+            }),
+          ].join("\n")}\n`,
+          { flag: "a" },
+        );
 
-      const equalTimestamp = "2026-08-24T10:01:00.000Z";
-      yield* fileSystem.writeFileString(
-        filePath,
-        `${[
-          encodeTranscriptRecord({
-            type: "user",
-            timestamp: equalTimestamp,
-            message: { content: "Appended prompt" },
-          }),
-          encodeTranscriptRecord({
-            type: "assistant",
-            timestamp: equalTimestamp,
-            message: { content: "Appended answer" },
-          }),
-        ].join("\n")}\n`,
-        { flag: "a" },
-      );
-
-      yield* followImportedTranscriptsOnce();
-      const readBack = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
-      expect(readBack.messages.map((message) => message.text)).toEqual([
-        "Original prompt",
-        "Appended prompt",
-        "Appended answer",
-      ]);
-      expect(readBack.messages.slice(1).map((message) => message.createdAt)).toEqual([
-        equalTimestamp,
-        equalTimestamp,
-      ]);
-    }),
+        yield* followImportedTranscriptsOnce();
+        const readBack = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+        expect(readBack.messages.map((message) => message.text)).toEqual([
+          "Original prompt",
+          "Appended prompt",
+          "Appended answer",
+        ]);
+        expect(readBack.messages.slice(1).map((message) => message.createdAt)).toEqual([
+          "2026-08-24T10:00:00.000Z",
+          "2026-08-24T10:00:00.000Z",
+        ]);
+      }),
   );
 
   it.effect(

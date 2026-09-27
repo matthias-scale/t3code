@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProviderSessionDirectoryPersistenceError } from "../provider/Errors.ts";
 import * as ProviderSessionDirectory from "../provider/Services/ProviderSessionDirectory.ts";
 import { pollOnce } from "./AgentSessionTranscriptFollower.ts";
 
@@ -156,6 +157,7 @@ const makeHarness = (input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly entries: Array<SourceEntry>;
   readonly threads: Map<string, OrchestrationThread>;
+  readonly sourceWriteFailures?: { remaining: number };
 }) => {
   const commands: Array<OrchestrationCommand> = [];
   const recordedSources: Array<AgentSessionImportSourceType> = [];
@@ -211,14 +213,24 @@ const makeHarness = (input: {
       latestSequence: Effect.succeed(0),
     }),
     Layer.mock(ProviderSessionDirectory.ProviderSessionDirectory)({
-      recordImportedTranscript: ({ threadId, source }) =>
-        Effect.sync(() => {
+      recordImportedTranscript: ({ threadId, source }) => {
+        if (input.sourceWriteFailures?.remaining) {
+          input.sourceWriteFailures.remaining -= 1;
+          return Effect.fail(
+            new ProviderSessionDirectoryPersistenceError({
+              operation: "recordImportedTranscript",
+              detail: "source write failed",
+            }),
+          );
+        }
+        return Effect.sync(() => {
           recordedSources.push(source);
           const index = input.entries.findIndex(
             (entry) => entry.threadId === threadId && entry.source.filePath === source.filePath,
           );
           if (index >= 0) input.entries[index] = { ...input.entries[index]!, source };
-        }),
+        });
+      },
     }),
   );
   const poll = () => pollOnce().pipe(Effect.provide(layer));
@@ -230,6 +242,7 @@ const observeReads = (
   onOpen: (filePath: string) => void,
   onSeek: (filePath: string, offset: number) => void,
   onRead: (filePath: string, size: number) => void,
+  reusableBuffer?: Uint8Array,
 ) =>
   FileSystem.FileSystem.of({
     ...fileSystem,
@@ -245,7 +258,16 @@ const observeReads = (
           },
           readAlloc: (size) => {
             onRead(filePath, size);
-            return file.readAlloc(size);
+            return file.readAlloc(size).pipe(
+              Effect.map(
+                reusableBuffer === undefined
+                  ? (chunk) => chunk
+                  : Option.map((chunk) => {
+                      reusableBuffer.set(chunk);
+                      return reusableBuffer.subarray(0, chunk.byteLength);
+                    }),
+              ),
+            );
           },
         })),
       );
@@ -321,6 +343,50 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
           .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
         expect(harness.commands).toHaveLength(1);
         expect(opened).toEqual([filePath]);
+      }),
+    );
+
+    it.effect("does not append again when saving the cursor fails after dispatch", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-cursor-retry-",
+        });
+        const filePath = `${directory}/session.jsonl`;
+        const initial = `${claudeRecord("user", "Original prompt")}\n`;
+        yield* fileSystem.writeFileString(filePath, initial);
+        const cursor = new TextEncoder().encode(initial).byteLength;
+        const threadId = ThreadId.make("import:claudeAgent:cursor-retry");
+        const source = yield* sourceFromFile(filePath, "cursor-retry", cursor);
+        const threads = new Map([[threadId, makeThread(threadId, PROJECT_A)]]);
+        const harness = makeHarness({
+          projects: [makeProject(PROJECT_A)],
+          entries: [{ projectId: PROJECT_A, threadId, source }],
+          threads,
+          sourceWriteFailures: { remaining: 1 },
+        });
+        yield* fileSystem.writeFileString(
+          filePath,
+          `${claudeRecord("assistant", "Dispatched once", "2026-09-27T10:01:00.000Z")}\n`,
+          { flag: "a" },
+        );
+
+        yield* harness.poll();
+        yield* harness.poll();
+
+        expect(harness.commands).toHaveLength(1);
+        expect(harness.commands[0]).toMatchObject({
+          type: "thread.history.import",
+          messages: [{ text: "Dispatched once" }],
+        });
+        expect(
+          threads.get(threadId)?.messages.filter((message) => message.text === "Dispatched once"),
+        ).toHaveLength(1);
+        expect(harness.entries[0]?.source.lastCompleteByteOffset).toBe(
+          new TextEncoder().encode(
+            `${initial}${claudeRecord("assistant", "Dispatched once", "2026-09-27T10:01:00.000Z")}\n`,
+          ).byteLength,
+        );
       }),
     );
 
@@ -601,6 +667,74 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
       }),
     );
 
+    it.effect("skips a multi-megabyte tool record with bounded reads", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-large-tool-",
+        });
+        const filePath = `${directory}/session.jsonl`;
+        const initial = `${claudeRecord("user", "Original prompt")}\n`;
+        yield* fileSystem.writeFileString(filePath, initial);
+        const cursor = new TextEncoder().encode(initial).byteLength;
+        const threadId = ThreadId.make("import:claudeAgent:large-tool");
+        const source = yield* sourceFromFile(filePath, "large-tool", cursor);
+        const threads = new Map([[threadId, makeThread(threadId, PROJECT_A)]]);
+        const harness = makeHarness({
+          projects: [makeProject(PROJECT_A)],
+          entries: [{ projectId: PROJECT_A, threadId, source }],
+          threads,
+        });
+        const largeToolRecord = encodeRecord({
+          type: "event_msg",
+          payload: {
+            type: "tool_call_output",
+            output: "x".repeat(5 * 1024 * 1024),
+          },
+        });
+        const assistantRecord = claudeRecord(
+          "assistant",
+          "After large tool output",
+          "2026-09-27T10:07:00.000Z",
+        );
+        yield* fileSystem.writeFileString(filePath, `${largeToolRecord}\n${assistantRecord}\n`, {
+          flag: "a",
+        });
+        let maxReadSize = 0;
+        const openedPaths: Array<string> = [];
+        const seekOffsets: Array<number> = [];
+        let readCount = 0;
+        const observedFileSystem = observeReads(
+          fileSystem,
+          (path) => openedPaths.push(path),
+          (_path, offset) => seekOffsets.push(offset),
+          (_path, size) => {
+            readCount += 1;
+            maxReadSize = Math.max(maxReadSize, size);
+          },
+          new Uint8Array(64 * 1024),
+        );
+
+        yield* harness
+          .poll()
+          .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+
+        const finalByteOffset = new TextEncoder().encode(
+          `${initial}${largeToolRecord}\n${assistantRecord}\n`,
+        ).byteLength;
+        expect(openedPaths).toEqual([filePath]);
+        expect(seekOffsets).toEqual([cursor]);
+        expect(readCount).toBeGreaterThan(0);
+        expect(harness.entries[0]?.source.lastCompleteByteOffset).toBe(finalByteOffset);
+        expect(harness.commands).toHaveLength(1);
+        expect(harness.commands[0]).toMatchObject({
+          type: "thread.history.import",
+          messages: [{ text: "After large tool output" }],
+        });
+        expect(maxReadSize).toBeLessThanOrEqual(64 * 1024);
+      }),
+    );
+
     it.effect("checks 500 recorded files and reads only the five changed files", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -704,6 +838,67 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
         expect(threads.get(threadId)?.messages.map((message) => message.text)).toEqual([
           "Original prompt",
           "New replacement answer",
+        ]);
+      }),
+    );
+
+    it.effect("does not revive history omitted from a 201-message replacement", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-replaced-cap-",
+        });
+        const filePath = `${directory}/session.jsonl`;
+        const transcriptMessages = Array.from({ length: 201 }, (_, index) => ({
+          role: index === 0 ? ("user" as const) : ("assistant" as const),
+          text: `Imported message ${index}`,
+        }));
+        const original = `${transcriptMessages
+          .map((message) => claudeRecord(message.role, message.text))
+          .join("\n")}\n`;
+        yield* fileSystem.writeFileString(filePath, original);
+        const oldCursor = new TextEncoder().encode(original).byteLength;
+        const threadId = ThreadId.make("import:claudeAgent:replaced-cap");
+        const source = yield* sourceFromFile(filePath, "replaced-cap", oldCursor);
+        const importedMessages = [transcriptMessages[0]!, ...transcriptMessages.slice(-199)];
+        const projectedMessages: OrchestrationThread["messages"] = importedMessages.map(
+          (message, index) => ({
+            id: MessageId.make(`${threadId}:${String(index).padStart(6, "0")}`),
+            role: message.role,
+            text: message.text,
+            turnId: null,
+            streaming: false,
+            createdAt: CREATED_AT,
+            updatedAt: CREATED_AT,
+          }),
+        );
+        const threads = new Map([
+          [threadId, { ...makeThread(threadId, PROJECT_A), messages: projectedMessages }],
+        ]);
+        const harness = makeHarness({
+          projects: [makeProject(PROJECT_A)],
+          entries: [{ projectId: PROJECT_A, threadId, source }],
+          threads,
+        });
+        const replacement = `${original}${claudeRecord(
+          "assistant",
+          "New replacement message",
+          "2026-09-27T10:08:00.000Z",
+        )}\n`;
+        const replacementPath = `${directory}/replacement.jsonl`;
+        yield* fileSystem.writeFileString(replacementPath, replacement);
+        yield* fileSystem.rename(replacementPath, filePath);
+
+        yield* harness.poll();
+
+        expect(harness.commands).toHaveLength(1);
+        expect(harness.commands[0]).toMatchObject({
+          type: "thread.history.import",
+          messages: [{ role: "assistant", text: "New replacement message" }],
+        });
+        expect(threads.get(threadId)?.messages.map((message) => message.text)).toEqual([
+          ...importedMessages.map((message) => message.text),
+          "New replacement message",
         ]);
       }),
     );

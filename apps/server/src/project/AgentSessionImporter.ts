@@ -70,6 +70,42 @@ function hasImportedHistory(thread: OrchestrationThread): boolean {
   return thread.messages.some((message) => isImportedAgentSessionMessageId(message.id));
 }
 
+function importedTranscriptAppendStart(
+  existing: OrchestrationThread["messages"],
+  scanned: AgentSessionScanner.AgentSessionThread["messages"],
+): number | undefined {
+  const lastExisting = existing.at(-1);
+  if (lastExisting === undefined) return undefined;
+
+  let bestEnd = -1;
+  let bestLength = 0;
+  let ambiguous = false;
+  for (let end = 0; end < scanned.length; end += 1) {
+    const candidate = scanned[end];
+    if (candidate?.role !== lastExisting.role || candidate.text !== lastExisting.text) {
+      continue;
+    }
+    let length = 1;
+    while (
+      length < existing.length &&
+      end - length >= 0 &&
+      existing[existing.length - length - 1]?.role === scanned[end - length]?.role &&
+      existing[existing.length - length - 1]?.text === scanned[end - length]?.text
+    ) {
+      length += 1;
+    }
+    if (length > bestLength) {
+      bestEnd = end;
+      bestLength = length;
+      ambiguous = false;
+    } else if (length === bestLength) {
+      ambiguous = true;
+    }
+  }
+
+  return bestLength === 0 || ambiguous ? undefined : bestEnd + 1;
+}
+
 function hasImportBlockingActivity(
   thread: OrchestrationThread,
   importedHistoryPresent: boolean,
@@ -214,6 +250,47 @@ const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
             return false;
           }
           if (recordedSource !== undefined) return false;
+
+          const appendStart = importedTranscriptAppendStart(
+            existingThread.value.messages,
+            thread.messages,
+          );
+          if (appendStart === undefined) {
+            yield* Effect.logWarning(
+              "Could not locate the imported history boundary in its transcript",
+              { threadId },
+            );
+          }
+          const existingMessageIds = new Set(
+            existingThread.value.messages.map((message) => message.id),
+          );
+          let latestCreatedAt = existingThread.value.messages.reduce(
+            (latest, message) => (message.createdAt > latest ? message.createdAt : latest),
+            existingThread.value.messages[0]?.createdAt ?? "",
+          );
+          const appendMessages = (
+            appendStart === undefined ? [] : thread.messages.slice(appendStart)
+          ).map((message, index) => {
+            let messageIndex = existingThread.value.messages.length + index;
+            let messageId = MessageId.make(`${threadId}:${String(messageIndex).padStart(6, "0")}`);
+            while (existingMessageIds.has(messageId)) {
+              messageIndex += 1;
+              messageId = MessageId.make(`${threadId}:${String(messageIndex).padStart(6, "0")}`);
+            }
+            existingMessageIds.add(messageId);
+            const createdAt =
+              message.createdAt > latestCreatedAt ? message.createdAt : latestCreatedAt;
+            latestCreatedAt = createdAt;
+            return { messageId, role: message.role, text: message.text, createdAt };
+          });
+          if (appendMessages.length > 0) {
+            yield* engine.dispatch({
+              type: "thread.history.import",
+              commandId: CommandId.make(yield* crypto.randomUUIDv4),
+              threadId,
+              messages: appendMessages,
+            });
+          }
           yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
           return true;
         }

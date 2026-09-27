@@ -144,7 +144,16 @@ const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
 const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
 
-type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
+export type AgentSessionTranscriptRecord = typeof TranscriptRecord.Type;
+type DecodedTranscriptRecord = AgentSessionTranscriptRecord;
+
+export function createAgentSessionTranscriptRecordReader(reserve: (bytes: number) => void) {
+  return createTranscriptJsonReader(reserve, selectTranscriptPath);
+}
+
+export function decodeAgentSessionTranscriptRecord(value: unknown) {
+  return decodeTranscriptValue(value);
+}
 
 interface AgentSessionTranscriptMetadata {
   readonly source: AgentSessionSource;
