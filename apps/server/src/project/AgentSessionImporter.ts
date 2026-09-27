@@ -31,6 +31,7 @@ import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
 const CLAUDE_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const warnedUnprovenImportRetries = new Set<string>();
 
 class AgentSessionUnresumableSessionError extends Schema.TaggedError<AgentSessionUnresumableSessionError>()(
   "AgentSessionUnresumableSessionError",
@@ -98,7 +99,7 @@ function hasImportBlockingActivity(
 }
 
 /** Import recent transcript text and persist the cursor needed to resume its provider session. */
-export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
+const importAgentThreads = Effect.fn("importRecentAgentThreads")(function* (
   input: AgentSessionImportInput,
 ) {
   const scanner = yield* AgentSessionScanner.AgentSessionScanner;
@@ -168,6 +169,13 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
       const threadId = ThreadId.make(
         `import:${thread.providerInstanceId}:${thread.providerSessionId}`,
       );
+      const recordedSource = completedSources.find(
+        (entry) =>
+          entry.threadId === threadId &&
+          entry.source.provider === outcome.source.provider &&
+          entry.source.providerInstanceId === outcome.source.providerInstanceId &&
+          entry.source.filePath === outcome.source.filePath,
+      );
       const imported = yield* Effect.gen(function* () {
         const provider = ProviderDriverKind.make(thread.source);
         const model = thread.model ?? DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL;
@@ -200,8 +208,21 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
           importedHistoryPresent &&
           Option.isSome(existingBinding)
         ) {
-          yield* directory.recordImportedTranscript({ threadId, source: outcome.source });
-          return true;
+          if (
+            hasImportBlockingActivity(existingThread.value, true) ||
+            existingBinding.value.status !== "stopped"
+          ) {
+            return false;
+          }
+          if (recordedSource !== undefined) return false;
+          if (!warnedUnprovenImportRetries.has(threadId)) {
+            warnedUnprovenImportRetries.add(threadId);
+            yield* Effect.logWarning(
+              "Skipping an imported transcript retry because its saved history boundary is unavailable",
+              { threadId, filePath: outcome.source.filePath },
+            );
+          }
+          return false;
         }
 
         if (
@@ -296,3 +317,6 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
 
   return { importedCount, skippedCount } satisfies AgentSessionImportResult;
 });
+
+export const importRecentAgentThreads = (input: AgentSessionImportInput) =>
+  importAgentThreads(input);

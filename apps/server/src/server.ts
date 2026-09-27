@@ -100,6 +100,8 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
+import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import * as AgentSessionTranscriptFollower from "./project/AgentSessionTranscriptFollower.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
@@ -959,12 +961,16 @@ const makeServerLayer = Layer.unwrap(
       disableLogger: !config.logWebSocketEvents,
       routerConfig: HTTP_ROUTER_CONFIG,
     }).pipe(Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)));
+    const transcriptFollowerLayer = Layer.effectDiscard(
+      AgentSessionTranscriptFollower.run.pipe(Effect.forkScoped),
+    ).pipe(Layer.provide(AgentSessionScanner.layer));
     const serverApplicationLayer = Layer.mergeAll(
       routesLayer,
       httpListeningLayer,
       runtimeStateLayer.pipe(Layer.provide(launcherLayer)),
       tailscaleServeLayer,
       cloudDesiredLinkReconcileLayer,
+      transcriptFollowerLayer,
       HeapSnapshot.layer,
     );
 

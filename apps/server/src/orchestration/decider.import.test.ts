@@ -174,6 +174,172 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
     }),
   );
 
+  it.effect("appends a repeated transcript update once and preserves prior messages", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const threadId = ThreadId.make("import:codex:session-follow");
+      const commandId = CommandId.make("command-follow-transcript");
+      const withThread = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-follow-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-thread-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-created"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "Imported thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const readModel = yield* projectEvent(withThread, {
+        sequence: 2,
+        eventId: EventId.make("event-follow-existing-message"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-existing-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-existing-message"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          messageId: MessageId.make(`${threadId}:000000`),
+          role: "user",
+          text: "Original prompt",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      const settledReadModel = yield* projectEvent(readModel, {
+        sequence: 3,
+        eventId: EventId.make("event-follow-thread-settled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.settled",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-follow-thread-settled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-settled"),
+        metadata: { historyImport: true },
+        payload: { threadId, settledAt: createdAt, updatedAt: createdAt },
+      });
+      const readModelAfterUnsettle = yield* projectEvent(settledReadModel, {
+        sequence: 4,
+        eventId: EventId.make("event-follow-thread-unsettled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.unsettled",
+        occurredAt: "2026-08-24T10:00:30.000Z",
+        commandId: CommandId.make("command-follow-thread-unsettled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-thread-unsettled"),
+        metadata: {},
+        payload: {
+          threadId,
+          reason: "user",
+          updatedAt: "2026-08-24T10:00:30.000Z",
+        },
+      });
+      const readModelWithOpenRequest = yield* projectEvent(readModelAfterUnsettle, {
+        sequence: 5,
+        eventId: EventId.make("event-follow-open-request"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.activity-appended",
+        occurredAt: "2026-08-24T10:00:45.000Z",
+        commandId: CommandId.make("command-follow-open-request"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-follow-open-request"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-follow-open-request"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Pending approval",
+            payload: { requestId: "pending-follow-request" },
+            turnId: null,
+            createdAt: "2026-08-24T10:00:45.000Z",
+          },
+        },
+      });
+      const previousMessage = readModelWithOpenRequest.threads[0]?.messages[0];
+      const previousLifecycle = {
+        settledOverride: readModelWithOpenRequest.threads[0]?.settledOverride,
+        settledAt: readModelWithOpenRequest.threads[0]?.settledAt,
+        unsettledAt: readModelWithOpenRequest.threads[0]?.unsettledAt,
+      };
+      const command = {
+        type: "thread.history.import" as const,
+        commandId,
+        threadId,
+        messages: [
+          {
+            messageId: MessageId.make(`${threadId}:transcript:0000000000000064`),
+            role: "assistant" as const,
+            text: "Follow-up answer",
+            createdAt: "2026-08-24T10:01:00.000Z",
+          },
+        ],
+      };
+      const events = yield* decideOrchestrationCommand({
+        command,
+        readModel: readModelWithOpenRequest,
+      });
+      const plannedEvents = Array.isArray(events) ? events : [events];
+      let projected = readModelWithOpenRequest;
+      for (const [index, event] of plannedEvents.entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 6 });
+      }
+
+      expect(plannedEvents).toMatchObject([
+        {
+          type: "thread.message-sent",
+          payload: {
+            messageId: `${threadId}:transcript:0000000000000064`,
+            text: "Follow-up answer",
+          },
+        },
+      ]);
+      expect(plannedEvents.some((event) => event.type === "thread.settled")).toBe(false);
+      expect(projected.threads[0]?.messages[0]).toEqual(previousMessage);
+      expect(projected.threads[0]?.messages.map((message) => message.id)).toEqual([
+        `${threadId}:000000`,
+        `${threadId}:transcript:0000000000000064`,
+      ]);
+      expect({
+        settledOverride: projected.threads[0]?.settledOverride,
+        settledAt: projected.threads[0]?.settledAt,
+        unsettledAt: projected.threads[0]?.unsettledAt,
+      }).toEqual(previousLifecycle);
+
+      const repeated = yield* Effect.flip(
+        decideOrchestrationCommand({
+          command: { ...command, commandId: CommandId.make("command-follow-transcript-again") },
+          readModel: projected,
+        }),
+      );
+      expect(repeated.message).toContain("already contains every imported message");
+      expect(projected.threads[0]?.messages).toHaveLength(2);
+    }),
+  );
+
   it.effect("allows a thread with a newly imported user message to be settled", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:00:00.000Z";

@@ -2,12 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import {
   AgentSessionImportProjectChangedError,
+  AgentSessionImportSource,
   CommandId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationCommand,
   type OrchestrationProjectShell,
   type OrchestrationThread,
@@ -61,6 +63,7 @@ import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import { importRecentAgentThreads } from "./AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
+import { pollOnce as followImportedTranscriptsOnce } from "./AgentSessionTranscriptFollower.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
 const WORKSPACE_ROOT = "/tmp/project-from-server";
@@ -98,6 +101,22 @@ const makeThreadOutcome = (thread: AgentSessionScanner.AgentSessionThread) =>
     },
   }) satisfies AgentSessionScanner.AgentSessionRecentThread;
 
+const makeImportableOutcome = (
+  thread: AgentSessionScanner.AgentSessionThread,
+  input: {
+    readonly source?: AgentSessionImportSource;
+    readonly appendFromByteOffset?: number;
+    readonly messageOffsets?: ReadonlyArray<number>;
+  } = {},
+) => ({
+  ...makeThreadOutcome(thread),
+  source: input.source ?? makeThreadOutcome(thread).source,
+  ...(input.appendFromByteOffset === undefined
+    ? {}
+    : { appendFromByteOffset: input.appendFromByteOffset }),
+  ...(input.messageOffsets === undefined ? {} : { messageOffsets: input.messageOffsets }),
+});
+
 const makeProject = (): OrchestrationProjectShell => ({
   id: PROJECT_ID,
   title: "Project",
@@ -113,6 +132,7 @@ const makeProjectedThread = (input: {
   readonly projectId?: ProjectId;
   readonly imported?: boolean;
   readonly includeFollowup?: boolean;
+  readonly activity?: "turn" | "session";
 }): OrchestrationThread => {
   const sourceThread = makeThread(input.source);
   const threadId = ThreadId.make(
@@ -128,12 +148,22 @@ const makeProjectedThread = (input: {
     pullRequests: [],
     branch: null,
     worktreePath: null,
-    latestTurn: null,
+    latestTurn:
+      input.activity === "turn"
+        ? {
+            turnId: TurnId.make("turn-running"),
+            state: "running",
+            requestedAt: "2026-08-24T10:00:00.000Z",
+            startedAt: "2026-08-24T10:00:00.000Z",
+            completedAt: null,
+            assistantMessageId: null,
+          }
+        : null,
     createdAt: sourceThread.createdAt,
     updatedAt: sourceThread.updatedAt,
     archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
+    settledOverride: input.imported ? "settled" : null,
+    settledAt: input.imported ? "2026-08-24T10:01:00.000Z" : null,
     deletedAt: null,
     messages: input.imported
       ? [
@@ -164,18 +194,34 @@ const makeProjectedThread = (input: {
     proposedPlans: [],
     activities: [],
     checkpoints: [],
-    session: null,
+    session:
+      input.activity === "session"
+        ? {
+            threadId,
+            status: "running",
+            providerName: sourceThread.source,
+            providerInstanceId: sourceThread.providerInstanceId,
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-08-24T10:02:00.000Z",
+          }
+        : null,
   };
 };
 
 const makeSnapshotsLayer = (input: {
   readonly project?: OrchestrationProjectShell;
   readonly getThread?: (threadId: ThreadId) => Option.Option<OrchestrationThread>;
+  readonly importedSources?: ReadonlyArray<{
+    readonly threadId: ThreadId;
+    readonly source: AgentSessionImportSource;
+  }>;
 }) =>
   Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
     getProjectShellById: () =>
       Effect.succeed(input.project === undefined ? Option.none() : Option.some(input.project)),
-    getImportedAgentSessionSources: () => Effect.succeed([]),
+    getImportedAgentSessionSources: () => Effect.succeed(input.importedSources ?? []),
     getThreadDetailById: (threadId) => Effect.succeed(input.getThread?.(threadId) ?? Option.none()),
   });
 
@@ -288,6 +334,349 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
+    it.effect("leaves changed imported transcripts for the dedicated follower", () =>
+      Effect.gen(function* () {
+        const baseThread = makeThread("codex");
+        const threadId = ThreadId.make("import:codex:codex-session");
+        const previousSource = { ...makeThreadOutcome(baseThread).source, size: 100 };
+        const grownSource = { ...previousSource, size: 160, mtimeMs: 1 };
+        const grownThread = {
+          ...baseThread,
+          messages: [
+            ...baseThread.messages,
+            { role: "user" as const, text: "New prompt", createdAt: "2026-08-24T10:02:00.000Z" },
+            {
+              role: "assistant" as const,
+              text: "New answer",
+              createdAt: "2026-08-24T10:03:00.000Z",
+            },
+          ],
+        };
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () =>
+            Stream.succeed(
+              makeImportableOutcome(grownThread, {
+                source: grownSource,
+                appendFromByteOffset: previousSource.size,
+                messageOffsets: [0, 50, 120, 140],
+              }),
+            ),
+        });
+        const commands: Array<OrchestrationCommand> = [];
+        const recorded: Array<AgentSessionImportSource> = [];
+        let projectedThread = makeProjectedThread({ source: "codex", imported: true });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              if (command.type === "thread.history.import") {
+                projectedThread = {
+                  ...projectedThread,
+                  messages: [
+                    ...projectedThread.messages,
+                    ...command.messages.map((message) => ({
+                      id: message.messageId,
+                      role: message.role,
+                      text: message.text,
+                      turnId: null,
+                      streaming: false,
+                      createdAt: message.createdAt,
+                      updatedAt: message.createdAt,
+                    })),
+                  ],
+                };
+              }
+              return { sequence: commands.length };
+            }),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: () => Effect.die("must not replace an imported binding"),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: ({ source }) => Effect.sync(() => void recorded.push(source)),
+          getBinding: () =>
+            Effect.succeedSome({
+              threadId,
+              provider: ProviderDriverKind.make("codex"),
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              status: "stopped",
+            }),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+
+        const snapshots = makeSnapshotsLayer({
+          project: makeProject(),
+          getThread: () => Option.some(projectedThread),
+          importedSources: [{ threadId, source: previousSource }],
+        });
+        const runFollow = () =>
+          runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots,
+          });
+        const firstResult = yield* runFollow();
+        const secondResult = yield* runFollow();
+
+        expect(firstResult).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(secondResult).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(commands).toHaveLength(0);
+        expect(recorded).toEqual([]);
+        expect(projectedThread.messages.map((message) => message.id)).toEqual([
+          `${threadId}:000000`,
+        ]);
+      }),
+    );
+
+    it.effect("skips ambiguous and regressing retries without a saved source", () =>
+      Effect.gen(function* () {
+        const originalThread = makeThread("codex");
+        const ambiguousThread = {
+          ...originalThread,
+          messages: [...originalThread.messages, ...originalThread.messages],
+        };
+        const regressingTimestampThread = {
+          ...originalThread,
+          messages: [
+            ...originalThread.messages,
+            {
+              role: "assistant" as const,
+              text: "Added after the first import",
+              createdAt: "2026-08-24T09:59:00.000Z",
+            },
+          ],
+        };
+        const initialSource = {
+          ...makeThreadOutcome(originalThread).source,
+          size: 100,
+        };
+        const threadId = ThreadId.make("import:codex:codex-session");
+        let scanCount = 0;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => {
+            const currentScan = scanCount++;
+            const scannedThread =
+              currentScan === 0
+                ? originalThread
+                : currentScan === 1
+                  ? ambiguousThread
+                  : regressingTimestampThread;
+            return Stream.succeed(
+              makeImportableOutcome(scannedThread, {
+                source: { ...initialSource, size: 100 + currentScan * 30 },
+              }),
+            );
+          },
+        });
+        const commands: Array<OrchestrationCommand> = [];
+        let projectedThread: OrchestrationThread | undefined;
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) =>
+            Effect.sync(() => {
+              commands.push(command);
+              if (command.type === "thread.create") {
+                projectedThread = makeProjectedThread({ source: "codex", imported: false });
+              } else if (command.type === "thread.history.import") {
+                const base =
+                  projectedThread ?? makeProjectedThread({ source: "codex", imported: false });
+                projectedThread = {
+                  ...base,
+                  settledOverride: "settled",
+                  settledAt: command.messages.at(-1)?.createdAt ?? base.settledAt,
+                  messages: [
+                    ...base.messages,
+                    ...command.messages.map((message) => ({
+                      id: message.messageId,
+                      role: message.role,
+                      text: message.text,
+                      turnId: null,
+                      streaming: false,
+                      createdAt: message.createdAt,
+                      updatedAt: message.createdAt,
+                    })),
+                  ],
+                };
+              }
+              return { sequence: commands.length };
+            }),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        let binding: ProviderSessionDirectory.ProviderRuntimeBinding | undefined;
+        let sourceSaveFailures = 1;
+        let successfulSourceSaves = 0;
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: (nextBinding) =>
+            Effect.sync(() => {
+              binding = nextBinding;
+            }),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: () => {
+            if (sourceSaveFailures > 0) {
+              sourceSaveFailures -= 1;
+              return Effect.fail(
+                new ProviderSessionDirectoryPersistenceError({
+                  operation: "recordImportedTranscript",
+                  detail: "first source save failed",
+                }),
+              );
+            }
+            successfulSourceSaves += 1;
+            return Effect.void;
+          },
+          getBinding: () =>
+            Effect.succeed(binding === undefined ? Option.none() : Option.some(binding)),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () => Effect.die("unused"),
+        });
+        const runAttempt = () =>
+          runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                projectedThread === undefined ? Option.none() : Option.some(projectedThread),
+            }),
+          });
+
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
+
+        const importedHistoryCommands = commands.filter(
+          (command) => command.type === "thread.history.import",
+        );
+        expect(importedHistoryCommands).toHaveLength(1);
+        expect(importedHistoryCommands[0]).toMatchObject({
+          messages: [{ text: "Fix the bug" }, { text: "Fixed" }],
+        });
+        expect(
+          projectedThread?.messages.filter(
+            (message) => message.text === "Added after the first import",
+          ),
+        ).toHaveLength(0);
+        expect(successfulSourceSaves).toBe(0);
+        expect(binding?.status).toBe("stopped");
+      }),
+    );
+
+    it.effect("does not append again when the transcript snapshot is unchanged", () =>
+      Effect.gen(function* () {
+        const source = makeThreadOutcome(makeThread("codex")).source;
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: () => Stream.succeed({ _tag: "AlreadyImported", source }),
+        });
+        const dispatch = vi.fn(() => Effect.die("unchanged transcripts cannot dispatch"));
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch,
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+
+        const result = yield* runImport({
+          scanner,
+          engine,
+          directory: ProviderSessionDirectory.ProviderSessionDirectory.of({
+            upsert: () => Effect.die("unchanged transcripts cannot bind a session"),
+            getProvider: () => Effect.die("unused"),
+            recordImportedTranscript: () =>
+              Effect.die("unchanged transcripts cannot update sources"),
+            getBinding: () => Effect.die("unchanged transcripts cannot read bindings"),
+            listThreadIds: () => Effect.die("unused"),
+            listBindings: () => Effect.die("unused"),
+          }),
+          snapshots: makeSnapshotsLayer({ project: makeProject() }),
+        });
+
+        expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(dispatch).not.toHaveBeenCalled();
+      }),
+    );
+
+    it.effect.each(["turn", "session"] as const)(
+      "does not append transcript messages while an imported thread has a T3 %s",
+      (activity) =>
+        Effect.gen(function* () {
+          const baseThread = makeThread("codex");
+          const threadId = ThreadId.make("import:codex:codex-session");
+          const previousSource = { ...makeThreadOutcome(baseThread).source, size: 100 };
+          const grownSource = { ...previousSource, size: 160, mtimeMs: 1 };
+          const scanner = AgentSessionScanner.AgentSessionScanner.of({
+            scan: Effect.die("unused"),
+            recentThreads: () =>
+              Stream.succeed(
+                makeImportableOutcome(baseThread, {
+                  source: grownSource,
+                  appendFromByteOffset: previousSource.size,
+                  messageOffsets: [120, 140],
+                }),
+              ),
+          });
+          const dispatch = vi.fn(() =>
+            Effect.die("active T3 threads cannot receive transcript history"),
+          );
+          const engine = OrchestrationEngine.OrchestrationEngineService.of({
+            dispatch,
+            readEvents: () => Stream.empty,
+            readThreadEvents: () => Stream.empty,
+            getThreadReplayStats: () => Effect.die("unused"),
+            streamDomainEvents: Stream.empty,
+            subscribeDomainEvents: Effect.succeed(Stream.empty),
+            latestSequence: Effect.succeed(0),
+          });
+          const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+            upsert: () => Effect.die("must not replace an imported binding"),
+            getProvider: () => Effect.die("unused"),
+            recordImportedTranscript: () =>
+              Effect.die("active T3 threads must not advance the cursor"),
+            getBinding: () =>
+              Effect.succeedSome({
+                threadId,
+                provider: ProviderDriverKind.make("codex"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                status: "stopped",
+              }),
+            listThreadIds: () => Effect.die("unused"),
+            listBindings: () => Effect.die("unused"),
+          });
+
+          const result = yield* runImport({
+            scanner,
+            engine,
+            directory,
+            snapshots: makeSnapshotsLayer({
+              project: makeProject(),
+              getThread: () =>
+                Option.some(makeProjectedThread({ source: "codex", imported: true, activity })),
+              importedSources: [{ threadId, source: previousSource }],
+            }),
+          });
+
+          expect(result).toEqual({ importedCount: 0, skippedCount: 1 });
+          expect(dispatch).not.toHaveBeenCalled();
+        }),
+    );
+
     it.effect("rejects a changed project root before scanning or writing", () =>
       Effect.gen(function* () {
         const recentThreads = vi.fn(() => Stream.empty);
@@ -356,15 +745,28 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
 
     it.effect("recovers after a rejected history receipt and a failed binding write", () =>
       Effect.gen(function* () {
+        const threadId = ThreadId.make("import:codex:codex-session");
         let threadCreated = false;
         let historyImported = false;
         let historyAttemptCount = 0;
         let bindingAttemptCount = 0;
         const rejectedCommandIds = new Set<string>();
         const bindings: Array<ProviderSessionDirectory.ProviderRuntimeBinding> = [];
+        const recordedSources: Array<{
+          readonly threadId: ThreadId;
+          readonly source: AgentSessionImportSource;
+        }> = [];
+        const importable = makeThreadOutcome(makeThread("codex"));
         const scanner = AgentSessionScanner.AgentSessionScanner.of({
           scan: Effect.die("unused"),
-          recentThreads: () => Stream.fromIterable([makeThreadOutcome(makeThread("codex"))]),
+          recentThreads: (_workspaceRoot, completedSources = []) => {
+            const completed = completedSources.find(
+              (source) => source.filePath === importable.source.filePath,
+            );
+            const outcome: AgentSessionScanner.AgentSessionRecentThread =
+              completed === undefined ? importable : { _tag: "AlreadyImported", source: completed };
+            return Stream.succeed(outcome);
+          },
         });
         const engine = OrchestrationEngine.OrchestrationEngineService.of({
           dispatch: (command) => {
@@ -414,7 +816,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             return Effect.void;
           },
           getProvider: () => Effect.die("unused"),
-          recordImportedTranscript: () => Effect.void,
+          recordImportedTranscript: ({ threadId, source }) =>
+            Effect.sync(() => void recordedSources.push({ threadId, source })),
           getBinding: () =>
             Effect.succeed(bindings[0] === undefined ? Option.none() : Option.some(bindings[0])),
           listThreadIds: () => Effect.die("unused"),
@@ -422,10 +825,33 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
-          getThread: () =>
-            threadCreated
-              ? Option.some(makeProjectedThread({ source: "codex", imported: historyImported }))
-              : Option.none(),
+          importedSources: recordedSources,
+          getThread: () => {
+            if (!threadCreated) return Option.none();
+            const projected = makeProjectedThread({
+              source: "codex",
+              imported: historyImported,
+            });
+            return Option.some(
+              historyImported
+                ? {
+                    ...projected,
+                    messages: [
+                      ...projected.messages,
+                      {
+                        id: MessageId.make(`${threadId}:000001`),
+                        role: "assistant",
+                        text: "Fixed",
+                        turnId: null,
+                        streaming: false,
+                        createdAt: "2026-08-24T10:01:00.000Z",
+                        updatedAt: "2026-08-24T10:01:00.000Z",
+                      },
+                    ],
+                  }
+                : projected,
+            );
+          },
         });
         const importOnce = () => runImport({ scanner, engine, directory, snapshots });
 
@@ -484,7 +910,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           }),
         });
 
-        expect(result).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(result).toEqual({ importedCount: 0, skippedCount: 1 });
       }),
     );
 
@@ -644,6 +1070,134 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         integrationThread.messages.map((message) => message.text),
       );
     }),
+  );
+
+  it.effect(
+    "reads appended messages after existing history when transcript timestamps go back",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const followerProjectId = ProjectId.make("follower-projection-order-project");
+        const followerWorkspaceRoot = "/tmp/follower-projection-order-workspace";
+        const followerSessionId = "99999999-9999-4999-8999-999999999999";
+        const threadId = ThreadId.make(`import:claudeAgent:${followerSessionId}`);
+        const fixtureDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-projection-order-",
+        });
+        const filePath = path.join(fixtureDir, "transcript.jsonl");
+        const initialRecord = encodeTranscriptRecord({
+          type: "user",
+          timestamp: "2026-08-24T10:00:00.000Z",
+          message: { content: "Original prompt" },
+        });
+        const initialContents = `${initialRecord}\n`;
+        yield* fileSystem.writeFileString(filePath, initialContents);
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("create-follower-projection-project"),
+          projectId: followerProjectId,
+          title: "Project",
+          workspaceRoot: followerWorkspaceRoot,
+          defaultModelSelection: null,
+          createdAt: "2026-08-24T09:00:00.000Z",
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-follower-projection-thread"),
+          threadId,
+          projectId: followerProjectId,
+          title: "Imported thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "default",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-08-24T10:00:00.000Z",
+          historyImport: true,
+        });
+        yield* engine.dispatch({
+          type: "thread.history.import",
+          commandId: CommandId.make("import-follower-projection-baseline"),
+          threadId,
+          messages: [
+            {
+              messageId: MessageId.make(`${threadId}:000000`),
+              role: "user",
+              text: "Original prompt",
+              createdAt: "2026-08-24T10:00:00.000Z",
+            },
+          ],
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          status: "stopped",
+          runtimeMode: "full-access",
+          resumeCursor: { threadId, resume: followerSessionId },
+          runtimePayload: { cwd: followerWorkspaceRoot },
+        });
+        const stats = yield* fileSystem.stat(filePath);
+        yield* directory.recordImportedTranscript({
+          threadId,
+          source: {
+            provider: "claudeAgent",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            providerSessionId: followerSessionId,
+            filePath,
+            size: Number(stats.size),
+            lastCompleteByteOffset: Number(stats.size),
+            mtimeMs: Option.match(stats.mtime, {
+              onNone: () => null,
+              onSome: (date) => date.getTime(),
+            }),
+            device: stats.dev,
+            inode: Option.getOrNull(stats.ino),
+            birthtimeMs: Option.match(stats.birthtime, {
+              onNone: () => null,
+              onSome: (date) => date.getTime(),
+            }),
+          } satisfies AgentSessionImportSource,
+        });
+
+        const earlierTimestamp = "2026-08-24T09:00:00.000Z";
+        yield* fileSystem.writeFileString(
+          filePath,
+          `${[
+            encodeTranscriptRecord({
+              type: "user",
+              timestamp: earlierTimestamp,
+              message: { content: "Appended prompt" },
+            }),
+            encodeTranscriptRecord({
+              type: "assistant",
+              timestamp: earlierTimestamp,
+              message: { content: "Appended answer" },
+            }),
+          ].join("\n")}\n`,
+          { flag: "a" },
+        );
+
+        yield* followImportedTranscriptsOnce();
+        const readBack = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+        expect(readBack.messages.map((message) => message.text)).toEqual([
+          "Original prompt",
+          "Appended prompt",
+          "Appended answer",
+        ]);
+        expect(readBack.messages.slice(1).map((message) => message.createdAt)).toEqual([
+          "2026-08-24T10:00:00.000Z",
+          "2026-08-24T10:00:00.000Z",
+        ]);
+      }),
   );
 
   it.effect(
@@ -811,13 +1365,14 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         });
 
         const first = yield* runAttempt(new Set());
-        expect(first.result).toEqual({ importedCount: 99, skippedCount: 2 });
+        expect(first.result).toEqual({ importedCount: 98, skippedCount: 3 });
         expect(failHistory).toBe(false);
         expect(first.fullReads).toEqual(transcripts.slice(0, 100).map((entry) => entry.filePath));
         expect(first.openCounts.get(remaining.filePath)).toBe(1);
         const completedSources = yield* snapshots.getImportedAgentSessionSources(projectId);
-        expect(completedSources).toHaveLength(99);
-        expect(completedSources).toContainEqual({
+        expect(completedSources).toHaveLength(98);
+        // Legacy imported history has no durable cursor, so the importer leaves it unrecorded.
+        expect(completedSources).not.toContainEqual({
           threadId: legacy.threadId,
           source: expect.objectContaining({ filePath: legacy.filePath }),
         });
@@ -832,14 +1387,14 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
 
         const completedPaths = new Set(completedSources.map((entry) => entry.source.filePath));
         const second = yield* runAttempt(completedPaths);
-        expect(second.result).toEqual({ importedCount: 101, skippedCount: 0 });
-        expect(second.fullReads).toEqual([failed.filePath, remaining.filePath]);
+        expect(second.result).toEqual({ importedCount: 100, skippedCount: 1 });
+        expect(second.fullReads).toEqual([legacy.filePath, failed.filePath, remaining.filePath]);
         for (const transcript of transcripts) {
           expect(second.openCounts.get(transcript.filePath)).toBe(
             completedPaths.has(transcript.filePath) ? 1 : 2,
           );
         }
-        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(101);
+        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(100);
         expect(
           Option.getOrThrow(yield* snapshots.getThreadDetailById(legacy.threadId)).messages.map(
             (message) => message.text,
