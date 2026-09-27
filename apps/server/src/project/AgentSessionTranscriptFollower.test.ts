@@ -14,6 +14,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -327,8 +328,8 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
           ).padStart(16, "0")}`,
         ]);
         expect(opened).toEqual([filePath]);
-        expect(seeks).toEqual([initialBytes]);
-        expect(readBytes).toBe(new TextEncoder().encode(`${appended}\n`).byteLength);
+        expect(seeks).toEqual([initialBytes - 1, initialBytes]);
+        expect(readBytes).toBe(new TextEncoder().encode(`${appended}\n`).byteLength + 1);
 
         const savedThread = threads.get(threadId)!;
         const originalMessage = savedThread.messages[0];
@@ -344,6 +345,77 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
         expect(harness.commands).toHaveLength(1);
         expect(opened).toEqual([filePath]);
       }),
+    );
+
+    it.effect(
+      "skips an in-place rewrite when the saved cursor is no longer a record boundary",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const directory = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-follower-in-place-rewrite-",
+          });
+          const filePath = `${directory}/session.jsonl`;
+          const original = `${claudeRecord("user", "Original prompt")}\n`;
+          yield* fileSystem.writeFileString(filePath, original);
+          const originalIdentity = yield* fileSystem.stat(filePath);
+          const cursor = new TextEncoder().encode(original).byteLength;
+          const threadId = ThreadId.make("import:claudeAgent:in-place-rewrite");
+          const source = yield* sourceFromFile(filePath, "in-place-rewrite", cursor);
+          const threads = new Map([[threadId, makeThread(threadId, PROJECT_A)]]);
+          const harness = makeHarness({
+            projects: [makeProject(PROJECT_A)],
+            entries: [{ projectId: PROJECT_A, threadId, source }],
+            threads,
+          });
+          const rewritten = `${claudeRecord("user", "A much longer rewritten prompt")}\n${claudeRecord(
+            "assistant",
+            "Must be skipped",
+            "2026-09-27T10:09:00.000Z",
+          )}\n`;
+          yield* fileSystem.writeFileString(filePath, rewritten, { flag: "w" });
+          const rewrittenIdentity = yield* fileSystem.stat(filePath);
+          expect(Option.getOrNull(rewrittenIdentity.ino)).toBe(
+            Option.getOrNull(originalIdentity.ino),
+          );
+          const warnings: Array<ReadonlyArray<unknown>> = [];
+          const logger = Logger.make<unknown, void>(({ message }) => {
+            warnings.push(message as ReadonlyArray<unknown>);
+          });
+          const opened: Array<string> = [];
+          const observedFileSystem = observeReads(
+            fileSystem,
+            (openedPath) => opened.push(openedPath),
+            () => {},
+            () => {},
+          );
+
+          yield* harness
+            .poll()
+            .pipe(
+              Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+              Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+            );
+          yield* harness
+            .poll()
+            .pipe(
+              Effect.provideService(FileSystem.FileSystem, observedFileSystem),
+              Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+            );
+
+          const savedSource = harness.entries[0]?.source;
+          const warningCount = warnings.filter((message) =>
+            message.join(" ").includes("Skipping a changed imported transcript"),
+          ).length;
+          expect(harness.commands).toHaveLength(0);
+          expect(threads.get(threadId)?.messages.map((message) => message.text)).toEqual([
+            "Original prompt",
+          ]);
+          expect(savedSource?.size).toBe(new TextEncoder().encode(rewritten).byteLength);
+          expect(savedSource?.lastCompleteByteOffset).toBe(savedSource?.size);
+          expect(opened).toEqual([filePath]);
+          expect(warningCount).toBe(1);
+        }),
     );
 
     it.effect("advances a backlog larger than the record limit across bounded passes", () =>
@@ -383,7 +455,7 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
           .poll()
           .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
         expect(opened).toEqual([filePath]);
-        expect(seeks).toEqual([cursor]);
+        expect(seeks).toEqual([cursor - 1, cursor]);
         expect(readSizes.length).toBeGreaterThan(0);
         expect(harness.entries[0]?.source.size).toBe(Number(appendedStats.size));
         const firstBatchCursor = harness.entries[0]?.source.lastCompleteByteOffset;
@@ -780,7 +852,7 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
           `${initial}${largeToolRecord}\n${assistantRecord}\n`,
         ).byteLength;
         expect(openedPaths).toEqual([filePath]);
-        expect(seekOffsets).toEqual([cursor]);
+        expect(seekOffsets).toEqual([cursor - 1, cursor]);
         expect(readCount).toBeGreaterThan(0);
         expect(harness.entries[0]?.source.lastCompleteByteOffset).toBe(finalByteOffset);
         expect(harness.commands).toHaveLength(1);

@@ -150,6 +150,13 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
           if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
             return null;
           }
+          let cursorBoundaryProven = startByteOffset === 0;
+          if (startByteOffset > 0) {
+            yield* file.seek(BigInt(startByteOffset - 1), "start");
+            const previousByte = yield* file.readAlloc(1);
+            if (Option.isNone(previousByte)) return null;
+            cursorBoundaryProven = previousByte.value[0] === 10;
+          }
           yield* file.seek(BigInt(startByteOffset), "start");
 
           const records: Array<AgentSessionTranscriptRecord> = [];
@@ -270,7 +277,13 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
               }
             }
           }
-          return { records, recordOffsets, completeRecordEndOffsets, lastCompleteByteOffset };
+          return {
+            records,
+            recordOffsets,
+            completeRecordEndOffsets,
+            lastCompleteByteOffset,
+            cursorBoundaryProven,
+          };
         }),
       ),
     ),
@@ -316,6 +329,21 @@ const followRecordedTranscript = Effect.fn(
     : 0;
   const snapshot = yield* readTranscriptAfter(source.filePath, currentIdentity, cursor);
   if (snapshot === null) return;
+
+  if (readingAppend && !snapshot.cursorBoundaryProven) {
+    yield* warnUnprovenReplacementOnce(imported.threadId, source.filePath);
+    yield* directory.recordImportedTranscript({
+      threadId: imported.threadId,
+      source: {
+        ...currentIdentity,
+        lastCompleteByteOffset: currentIdentity.size,
+        provider: source.provider,
+        providerInstanceId: source.providerInstanceId,
+        providerSessionId: source.providerSessionId,
+      },
+    });
+    return;
+  }
 
   const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
   const parsed = parseAgentSessionRecords(
