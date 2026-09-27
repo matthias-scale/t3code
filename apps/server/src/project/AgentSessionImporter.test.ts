@@ -436,17 +436,21 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
       }),
     );
 
-    it.effect("reconciles new messages when the first source save failed", () =>
+    it.effect("skips ambiguous and regressing retries without a saved source", () =>
       Effect.gen(function* () {
         const originalThread = makeThread("codex");
-        const grownThread = {
+        const ambiguousThread = {
+          ...originalThread,
+          messages: [...originalThread.messages, ...originalThread.messages],
+        };
+        const regressingTimestampThread = {
           ...originalThread,
           messages: [
             ...originalThread.messages,
             {
               role: "assistant" as const,
               text: "Added after the first import",
-              createdAt: "2026-08-24T10:02:00.000Z",
+              createdAt: "2026-08-24T09:59:00.000Z",
             },
           ],
         };
@@ -458,12 +462,20 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         let scanCount = 0;
         const scanner = AgentSessionScanner.AgentSessionScanner.of({
           scan: Effect.die("unused"),
-          recentThreads: () =>
-            Stream.succeed(
-              makeImportableOutcome(scanCount++ === 0 ? originalThread : grownThread, {
-                source: { ...initialSource, size: scanCount === 1 ? 100 : 160 },
+          recentThreads: () => {
+            const currentScan = scanCount++;
+            const scannedThread =
+              currentScan === 0
+                ? originalThread
+                : currentScan === 1
+                  ? ambiguousThread
+                  : regressingTimestampThread;
+            return Stream.succeed(
+              makeImportableOutcome(scannedThread, {
+                source: { ...initialSource, size: 100 + currentScan * 30 },
               }),
-            ),
+            );
+          },
         });
         const commands: Array<OrchestrationCommand> = [];
         let projectedThread: OrchestrationThread | undefined;
@@ -543,25 +555,22 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           });
 
         expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
-        expect(yield* runAttempt()).toEqual({ importedCount: 1, skippedCount: 0 });
-        expect(yield* runAttempt()).toEqual({ importedCount: 1, skippedCount: 0 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
+        expect(yield* runAttempt()).toEqual({ importedCount: 0, skippedCount: 1 });
 
         const importedHistoryCommands = commands.filter(
           (command) => command.type === "thread.history.import",
         );
-        expect(importedHistoryCommands).toHaveLength(2);
+        expect(importedHistoryCommands).toHaveLength(1);
         expect(importedHistoryCommands[0]).toMatchObject({
           messages: [{ text: "Fix the bug" }, { text: "Fixed" }],
-        });
-        expect(importedHistoryCommands[1]).toMatchObject({
-          messages: [{ text: "Added after the first import" }],
         });
         expect(
           projectedThread?.messages.filter(
             (message) => message.text === "Added after the first import",
           ),
-        ).toHaveLength(1);
-        expect(successfulSourceSaves).toBe(2);
+        ).toHaveLength(0);
+        expect(successfulSourceSaves).toBe(0);
         expect(binding?.status).toBe("stopped");
       }),
     );
@@ -743,9 +752,21 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         let bindingAttemptCount = 0;
         const rejectedCommandIds = new Set<string>();
         const bindings: Array<ProviderSessionDirectory.ProviderRuntimeBinding> = [];
+        const recordedSources: Array<{
+          readonly threadId: ThreadId;
+          readonly source: AgentSessionImportSource;
+        }> = [];
+        const importable = makeThreadOutcome(makeThread("codex"));
         const scanner = AgentSessionScanner.AgentSessionScanner.of({
           scan: Effect.die("unused"),
-          recentThreads: () => Stream.fromIterable([makeThreadOutcome(makeThread("codex"))]),
+          recentThreads: (_workspaceRoot, completedSources = []) => {
+            const completed = completedSources.find(
+              (source) => source.filePath === importable.source.filePath,
+            );
+            const outcome: AgentSessionScanner.AgentSessionRecentThread =
+              completed === undefined ? importable : { _tag: "AlreadyImported", source: completed };
+            return Stream.succeed(outcome);
+          },
         });
         const engine = OrchestrationEngine.OrchestrationEngineService.of({
           dispatch: (command) => {
@@ -795,7 +816,8 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
             return Effect.void;
           },
           getProvider: () => Effect.die("unused"),
-          recordImportedTranscript: () => Effect.void,
+          recordImportedTranscript: ({ threadId, source }) =>
+            Effect.sync(() => void recordedSources.push({ threadId, source })),
           getBinding: () =>
             Effect.succeed(bindings[0] === undefined ? Option.none() : Option.some(bindings[0])),
           listThreadIds: () => Effect.die("unused"),
@@ -803,6 +825,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
+          importedSources: recordedSources,
           getThread: () => {
             if (!threadCreated) return Option.none();
             const projected = makeProjectedThread({
@@ -1342,13 +1365,14 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         });
 
         const first = yield* runAttempt(new Set());
-        expect(first.result).toEqual({ importedCount: 99, skippedCount: 2 });
+        expect(first.result).toEqual({ importedCount: 98, skippedCount: 3 });
         expect(failHistory).toBe(false);
         expect(first.fullReads).toEqual(transcripts.slice(0, 100).map((entry) => entry.filePath));
         expect(first.openCounts.get(remaining.filePath)).toBe(1);
         const completedSources = yield* snapshots.getImportedAgentSessionSources(projectId);
-        expect(completedSources).toHaveLength(99);
-        expect(completedSources).toContainEqual({
+        expect(completedSources).toHaveLength(98);
+        // Legacy imported history has no durable cursor, so the importer leaves it unrecorded.
+        expect(completedSources).not.toContainEqual({
           threadId: legacy.threadId,
           source: expect.objectContaining({ filePath: legacy.filePath }),
         });
@@ -1363,14 +1387,14 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
 
         const completedPaths = new Set(completedSources.map((entry) => entry.source.filePath));
         const second = yield* runAttempt(completedPaths);
-        expect(second.result).toEqual({ importedCount: 101, skippedCount: 0 });
-        expect(second.fullReads).toEqual([failed.filePath, remaining.filePath]);
+        expect(second.result).toEqual({ importedCount: 100, skippedCount: 1 });
+        expect(second.fullReads).toEqual([legacy.filePath, failed.filePath, remaining.filePath]);
         for (const transcript of transcripts) {
           expect(second.openCounts.get(transcript.filePath)).toBe(
             completedPaths.has(transcript.filePath) ? 1 : 2,
           );
         }
-        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(101);
+        expect(yield* snapshots.getImportedAgentSessionSources(projectId)).toHaveLength(100);
         expect(
           Option.getOrThrow(yield* snapshots.getThreadDetailById(legacy.threadId)).messages.map(
             (message) => message.text,

@@ -346,6 +346,63 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
       }),
     );
 
+    it.effect("advances a backlog larger than the record limit across bounded passes", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-record-batches-",
+        });
+        const filePath = `${directory}/session.jsonl`;
+        const initial = `${claudeRecord("user", "Original prompt")}\n`;
+        yield* fileSystem.writeFileString(filePath, initial);
+        const cursor = new TextEncoder().encode(initial).byteLength;
+        const threadId = ThreadId.make("import:claudeAgent:record-batches");
+        const source = yield* sourceFromFile(filePath, "record-batches", cursor);
+        const backlogRecord = "{}";
+        const backlog = Array.from({ length: 100_001 }, () => backlogRecord).join("\n");
+        yield* fileSystem.writeFileString(filePath, `${backlog}\n`, { flag: "a" });
+        const appendedStats = yield* fileSystem.stat(filePath);
+        expect(Number(appendedStats.size)).toBeGreaterThan(source.size);
+        const threads = new Map([[threadId, makeThread(threadId, PROJECT_A)]]);
+        const harness = makeHarness({
+          projects: [makeProject(PROJECT_A)],
+          entries: [{ projectId: PROJECT_A, threadId, source }],
+          threads,
+        });
+        const opened: Array<string> = [];
+        const seeks: Array<number> = [];
+        const readSizes: Array<number> = [];
+        const observedFileSystem = observeReads(
+          fileSystem,
+          (filePath) => opened.push(filePath),
+          (_filePath, offset) => seeks.push(offset),
+          (_filePath, size) => readSizes.push(size),
+        );
+
+        yield* harness
+          .poll()
+          .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+        expect(opened).toEqual([filePath]);
+        expect(seeks).toEqual([cursor]);
+        expect(readSizes.length).toBeGreaterThan(0);
+        expect(harness.entries[0]?.source.size).toBe(Number(appendedStats.size));
+        const firstBatchCursor = harness.entries[0]?.source.lastCompleteByteOffset;
+        const firstBatchBytes = new TextEncoder().encode(`${backlogRecord}\n`).byteLength * 100_000;
+        expect(firstBatchCursor).toBe(cursor + firstBatchBytes);
+        expect(firstBatchCursor).toBeLessThan(harness.entries[0]?.source.size ?? 0);
+
+        yield* harness
+          .poll()
+          .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+
+        expect(opened).toEqual([filePath, filePath]);
+        expect(harness.commands).toHaveLength(0);
+        expect(harness.entries[0]?.source.lastCompleteByteOffset).toBe(
+          harness.entries[0]?.source.size,
+        );
+      }),
+    );
+
     it.effect("does not append again when saving the cursor fails after dispatch", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -786,7 +843,7 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
       }),
     );
 
-    it.effect("reparses a replacement once, skips existing content, and stores its identity", () =>
+    it.effect("appends after a byte-identical replacement prefix only once", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const directory = yield* fileSystem.makeTempDirectoryScoped({
@@ -838,6 +895,61 @@ it.layer(NodeServices.layer)("AgentSessionTranscriptFollower", (it) => {
         expect(threads.get(threadId)?.messages.map((message) => message.text)).toEqual([
           "Original prompt",
           "New replacement answer",
+        ]);
+      }),
+    );
+
+    it.effect("skips an unproven replacement and saves its new end cursor", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-follower-replaced-changed-prefix-",
+        });
+        const filePath = `${directory}/session.jsonl`;
+        const original = `${claudeRecord("user", "Original prompt")}\n`;
+        yield* fileSystem.writeFileString(filePath, original);
+        const oldCursor = new TextEncoder().encode(original).byteLength;
+        const threadId = ThreadId.make("import:claudeAgent:changed-prefix");
+        const source = yield* sourceFromFile(filePath, "changed-prefix", oldCursor);
+        const threads = new Map([[threadId, makeThread(threadId, PROJECT_A)]]);
+        const harness = makeHarness({
+          projects: [makeProject(PROJECT_A)],
+          entries: [{ projectId: PROJECT_A, threadId, source }],
+          threads,
+        });
+        const replacement = `${claudeRecord("user", "Rewritten prompt with a longer prefix")}\n${claudeRecord(
+          "assistant",
+          "New replacement answer",
+          "2026-09-27T10:08:00.000Z",
+        )}\n`;
+        const replacementPath = `${directory}/replacement.jsonl`;
+        yield* fileSystem.writeFileString(replacementPath, replacement);
+        yield* fileSystem.rename(replacementPath, filePath);
+        const opened: Array<string> = [];
+        const observedFileSystem = observeReads(
+          fileSystem,
+          (openedPath) => opened.push(openedPath),
+          () => {},
+          () => {},
+        );
+
+        yield* harness
+          .poll()
+          .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+        const savedIdentity = harness.entries[0]?.source;
+        yield* harness
+          .poll()
+          .pipe(Effect.provideService(FileSystem.FileSystem, observedFileSystem));
+
+        const replacementSize = new TextEncoder().encode(replacement).byteLength;
+        expect(harness.commands).toHaveLength(0);
+        expect(opened).toEqual([filePath]);
+        expect(savedIdentity).toMatchObject({
+          size: replacementSize,
+          lastCompleteByteOffset: replacementSize,
+        });
+        expect(threads.get(threadId)?.messages.map((message) => message.text)).toEqual([
+          "Original prompt",
         ]);
       }),
     );

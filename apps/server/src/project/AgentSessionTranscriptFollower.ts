@@ -30,7 +30,9 @@ const FOLLOW_INTERVAL = Duration.seconds(10);
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_FOLLOWER_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_FOLLOWER_RECORDS = 100_000;
+const MAX_IMPORTED_MESSAGES = 200;
 const TRANSCRIPT_MESSAGE_ID_WIDTH = 16;
+const warnedUnprovenReplacementThreads = new Set<string>();
 
 type ImportedTranscript = {
   readonly threadId: OrchestrationThread["id"];
@@ -101,6 +103,40 @@ function isDifferentFile(
   );
 }
 
+function replacementHistoryMatches(
+  thread: OrchestrationThread,
+  parsed: NonNullable<ReturnType<typeof parseAgentSessionRecords>>,
+  boundary: number,
+  completeRecordEndOffsets: ReadonlyArray<number>,
+): boolean {
+  if (!completeRecordEndOffsets.includes(boundary)) return false;
+  const prefix = parsed.thread.messages.filter((_, index) => {
+    const offset = parsed.messageOffsets[index];
+    return offset !== undefined && offset < boundary;
+  });
+  const retainedPrefix =
+    prefix.length > MAX_IMPORTED_MESSAGES
+      ? [prefix[0]!, ...prefix.slice(-(MAX_IMPORTED_MESSAGES - 1))]
+      : prefix;
+  return (
+    retainedPrefix.length === thread.messages.length &&
+    retainedPrefix.every(
+      (message, index) =>
+        message.role === thread.messages[index]?.role &&
+        message.text === thread.messages[index]?.text,
+    )
+  );
+}
+
+function warnUnprovenReplacementOnce(threadId: string, filePath: string) {
+  if (warnedUnprovenReplacementThreads.has(threadId)) return Effect.void;
+  warnedUnprovenReplacementThreads.add(threadId);
+  return Effect.logWarning(
+    "Skipping a changed imported transcript because its saved history boundary could not be verified",
+    { threadId, filePath },
+  );
+}
+
 const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterCursor")(function* (
   filePath: string,
   expected: ReturnType<typeof transcriptIdentity>,
@@ -118,6 +154,7 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
 
           const records: Array<AgentSessionTranscriptRecord> = [];
           const recordOffsets: Array<number> = [];
+          const completeRecordEndOffsets: Array<number> = [];
           let historyBytes = 0;
           let bytesRead = startByteOffset;
           let recordStartOffset = startByteOffset;
@@ -126,6 +163,7 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
           let recordStarted = false;
           let discardRecord = false;
           let historyLimitReached = false;
+          let recordLimitReached = false;
           const newReader = () =>
             createAgentSessionTranscriptRecordReader((bytes) => {
               recordBytes += bytes;
@@ -148,7 +186,6 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
 
           const finishRecord = (recordEndOffset: number) => {
             recordCount += 1;
-            if (recordCount > MAX_FOLLOWER_RECORDS) return false;
             if (!discardRecord) {
               try {
                 reader.write(decoder.decode());
@@ -164,19 +201,23 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
             }
             if (historyLimitReached) return true;
             lastCompleteByteOffset = recordEndOffset;
+            completeRecordEndOffsets.push(recordEndOffset);
             resetRecord();
+            recordLimitReached = recordCount >= MAX_FOLLOWER_RECORDS;
             return true;
           };
 
-          while (bytesRead < expected.size) {
+          while (bytesRead < expected.size && !recordLimitReached) {
             const next = yield* file.readAlloc(
               Math.min(READ_CHUNK_BYTES, expected.size - bytesRead),
             );
-            if (Option.isNone(next)) return null;
+            if (Option.isNone(next)) {
+              return null;
+            }
             const chunkOffset = bytesRead;
             bytesRead += next.value.byteLength;
             let start = 0;
-            while (start < next.value.byteLength && !historyLimitReached) {
+            while (start < next.value.byteLength && !historyLimitReached && !recordLimitReached) {
               const newline = next.value.indexOf(10, start);
               const end = newline === -1 ? next.value.byteLength : newline;
               recordStarted = true;
@@ -193,7 +234,7 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
               if (newline === -1) break;
               const recordEndOffset = chunkOffset + newline + 1;
               if (!finishRecord(recordEndOffset)) return null;
-              if (historyLimitReached) break;
+              if (historyLimitReached || recordLimitReached) break;
               start = newline + 1;
               recordStartOffset = recordEndOffset;
             }
@@ -203,27 +244,33 @@ const readTranscriptAfter = Effect.fn("AgentSessionTranscriptFollower.readAfterC
             return null;
           }
 
-          if (recordStarted && !historyLimitReached) {
+          if (recordStarted && !historyLimitReached && !recordLimitReached) {
             if (!discardRecord) {
               const decoded = yield* Effect.try({
                 try: () => {
                   reader.write(decoder.decode());
-                  return decodeAgentSessionTranscriptRecord(reader.finish());
+                  const value = reader.finish();
+                  return value === undefined
+                    ? undefined
+                    : decodeAgentSessionTranscriptRecord(value);
                 },
                 catch: () => {
                   discardRecord = true;
-                  return Option.none<AgentSessionTranscriptRecord>();
+                  return undefined;
                 },
               });
-              if (Option.isSome(decoded)) {
-                records.push(decoded.value);
-                recordOffsets.push(recordStartOffset);
+              if (!discardRecord && decoded !== undefined) {
+                if (Option.isSome(decoded)) {
+                  records.push(decoded.value);
+                  recordOffsets.push(recordStartOffset);
+                }
                 historyBytes += recordBytes;
                 lastCompleteByteOffset = expected.size;
+                completeRecordEndOffsets.push(expected.size);
               }
             }
           }
-          return { records, recordOffsets, lastCompleteByteOffset };
+          return { records, recordOffsets, completeRecordEndOffsets, lastCompleteByteOffset };
         }),
       ),
     ),
@@ -242,10 +289,11 @@ const followRecordedTranscript = Effect.fn(
   const statExit = yield* fileSystem.stat(source.filePath).pipe(Effect.exit);
   if (Exit.isFailure(statExit) || statExit.value.type !== "File") return;
   const currentIdentity = transcriptIdentity(source.filePath, statExit.value);
+  const savedCursor = source.lastCompleteByteOffset ?? source.size;
   if (
     !Number.isSafeInteger(currentIdentity.size) ||
     currentIdentity.size < 0 ||
-    sameTranscriptIdentity(source, currentIdentity)
+    (sameTranscriptIdentity(source, currentIdentity) && savedCursor >= currentIdentity.size)
   ) {
     return;
   }
@@ -283,27 +331,38 @@ const followRecordedTranscript = Effect.fn(
     true,
   );
 
-  const lastCompleteByteOffset =
+  let lastCompleteByteOffset =
     parsed?.lastAmbiguousCodexUserOffset === undefined
       ? snapshot.lastCompleteByteOffset
       : Math.min(snapshot.lastCompleteByteOffset, parsed.lastAmbiguousCodexUserOffset);
 
   if (parsed === null || parsed.thread.providerSessionId !== source.providerSessionId) {
-    yield* Effect.logWarning("Could not parse a changed imported transcript", {
-      threadId: imported.threadId,
-      filePath: source.filePath,
-    });
+    if (readingAppend) {
+      yield* Effect.logWarning("Could not parse a changed imported transcript", {
+        threadId: imported.threadId,
+        filePath: source.filePath,
+      });
+    } else {
+      lastCompleteByteOffset = currentIdentity.size;
+      yield* warnUnprovenReplacementOnce(imported.threadId, source.filePath);
+    }
   } else {
     const differentFile = isDifferentFile(source, currentIdentity);
-    const existingMessageIds = new Set(thread.messages.map((message) => message.id));
-    const existingMessageContentCounts = new Map<string, number>();
-    for (const message of thread.messages) {
-      const contentKey = `${message.role}\0${message.text}`;
-      existingMessageContentCounts.set(
-        contentKey,
-        (existingMessageContentCounts.get(contentKey) ?? 0) + 1,
+    const replacementBoundary = source.lastCompleteByteOffset ?? source.size;
+    const replacementBoundaryProven =
+      readingAppend ||
+      replacementHistoryMatches(
+        thread,
+        parsed,
+        replacementBoundary,
+        snapshot.completeRecordEndOffsets,
       );
+    if (!readingAppend && !replacementBoundaryProven) {
+      lastCompleteByteOffset = currentIdentity.size;
+      yield* warnUnprovenReplacementOnce(imported.threadId, source.filePath);
     }
+    const appendBoundary = readingAppend ? cursor : replacementBoundary;
+    const existingMessageIds = new Set(thread.messages.map((message) => message.id));
     const codexEventOffsets = new Set(parsed.codexEventMessageOffsets);
     const lastExistingUserMessage = thread.messages
       .toReversed()
@@ -314,59 +373,51 @@ const followRecordedTranscript = Effect.fn(
     const userIsThreadTail =
       lastExistingUserMessage !== undefined &&
       thread.messages.findLastIndex((message) => message.role === "user") > lastAssistantIndex;
-    const replacementBoundary = source.lastCompleteByteOffset ?? source.size;
     let latestCreatedAt = thread.messages.reduce(
       (latest, message) => (message.createdAt > latest ? message.createdAt : latest),
       thread.messages[0]?.createdAt ?? "",
     );
 
-    const appendMessages = parsed.thread.messages.flatMap((message, index) => {
-      const offset = parsed.messageOffsets[index];
-      if (offset === undefined || offset >= lastCompleteByteOffset) return [];
-      if (readingAppend && offset < cursor) return [];
-      if (!readingAppend && offset < replacementBoundary) return [];
-      if (!readingAppend && !differentFile) {
-        const contentKey = `${message.role}\0${message.text}`;
-        const existingCount = existingMessageContentCounts.get(contentKey) ?? 0;
-        if (existingCount > 0) {
-          if (existingCount === 1) existingMessageContentCounts.delete(contentKey);
-          else existingMessageContentCounts.set(contentKey, existingCount - 1);
-          return [];
-        }
-      }
-      if (
-        source.provider === "codex" &&
-        message.role === "user" &&
-        codexEventOffsets.has(offset) &&
-        userIsThreadTail &&
-        lastExistingUserMessage?.text.trim() === message.text.trim()
-      ) {
-        return [];
-      }
+    const appendMessages = replacementBoundaryProven
+      ? parsed.thread.messages.flatMap((message, index) => {
+          const offset = parsed.messageOffsets[index];
+          if (offset === undefined || offset >= lastCompleteByteOffset) return [];
+          if (offset < appendBoundary) return [];
+          if (
+            source.provider === "codex" &&
+            message.role === "user" &&
+            codexEventOffsets.has(offset) &&
+            userIsThreadTail &&
+            lastExistingUserMessage?.text.trim() === message.text.trim()
+          ) {
+            return [];
+          }
 
-      let messageId = MessageId.make(
-        `${imported.threadId}:transcript:${String(offset).padStart(TRANSCRIPT_MESSAGE_ID_WIDTH, "0")}`,
-      );
-      if (existingMessageIds.has(messageId)) {
-        if (!differentFile) return [];
-        const identitySuffix = `${currentIdentity.device}-${currentIdentity.inode ?? currentIdentity.birthtimeMs ?? "replacement"}`;
-        messageId = MessageId.make(
-          `${imported.threadId}:transcript:${String(offset).padStart(TRANSCRIPT_MESSAGE_ID_WIDTH, "0")}:${identitySuffix}`,
-        );
-        if (existingMessageIds.has(messageId)) return [];
-      }
-      existingMessageIds.add(messageId);
-      const createdAt = message.createdAt > latestCreatedAt ? message.createdAt : latestCreatedAt;
-      latestCreatedAt = createdAt;
-      return [
-        {
-          messageId,
-          role: message.role,
-          text: message.text,
-          createdAt,
-        },
-      ];
-    });
+          let messageId = MessageId.make(
+            `${imported.threadId}:transcript:${String(offset).padStart(TRANSCRIPT_MESSAGE_ID_WIDTH, "0")}`,
+          );
+          if (existingMessageIds.has(messageId)) {
+            if (!differentFile) return [];
+            const identitySuffix = `${currentIdentity.device}-${currentIdentity.inode ?? currentIdentity.birthtimeMs ?? "replacement"}`;
+            messageId = MessageId.make(
+              `${imported.threadId}:transcript:${String(offset).padStart(TRANSCRIPT_MESSAGE_ID_WIDTH, "0")}:${identitySuffix}`,
+            );
+            if (existingMessageIds.has(messageId)) return [];
+          }
+          existingMessageIds.add(messageId);
+          const createdAt =
+            message.createdAt > latestCreatedAt ? message.createdAt : latestCreatedAt;
+          latestCreatedAt = createdAt;
+          return [
+            {
+              messageId,
+              role: message.role,
+              text: message.text,
+              createdAt,
+            },
+          ];
+        })
+      : [];
 
     if (appendMessages.length > 0) {
       yield* engine.dispatch({
