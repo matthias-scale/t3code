@@ -263,7 +263,28 @@ export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
 ): ServerSettings {
-  const patch = translateLegacyProjectOverridePatch(current, rawPatch);
+  const {
+    sidebarAutoSettleAfterDays: _legacyAutoSettleDays,
+    projectSettingsOverrides: rawProjectSettingsOverrides,
+    ...currentPatch
+  } = rawPatch;
+  const currentProjectSettingsOverrides = new Map<string, ProjectSettingsOverrides | null>();
+  for (const [projectId, entry] of Object.entries(rawProjectSettingsOverrides ?? {})) {
+    if (entry === null) {
+      currentProjectSettingsOverrides.set(projectId, null);
+      continue;
+    }
+    const { sidebarAutoSettleAfterDays: _legacyDays, ...currentEntry } = entry;
+    if (Object.keys(entry).length === 0 || Object.keys(currentEntry).length > 0) {
+      currentProjectSettingsOverrides.set(projectId, currentEntry);
+    }
+  }
+  const patch = translateLegacyProjectOverridePatch(current, {
+    ...currentPatch,
+    ...(currentProjectSettingsOverrides.size > 0
+      ? { projectSettingsOverrides: Object.fromEntries(currentProjectSettingsOverrides) }
+      : {}),
+  } as ServerSettingsPatch);
   const selectionPatch = patch.textGenerationModelSelection;
   const {
     automaticGitFetchInterval,

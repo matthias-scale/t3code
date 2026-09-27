@@ -10,6 +10,7 @@ import { resolveWorktreeCleanup } from "@t3tools/shared/projectSettings";
 
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import {
+  autoSettleUnitForEnvironments,
   listProjectOverrides,
   persistScopedSettingsPatch,
   planProjectOverridesClear,
@@ -29,6 +30,7 @@ function environment(
     loaded?: boolean;
     settings?: Partial<ServerSettings>;
     projectOverrides?: boolean;
+    settlementHours?: boolean;
   } = {},
 ) {
   return {
@@ -43,7 +45,10 @@ function environment(
         : {
             settings: { ...DEFAULT_SERVER_SETTINGS, ...options.settings },
             environment: {
-              capabilities: { projectSettingsOverrides: options.projectOverrides !== false },
+              capabilities: {
+                projectSettingsOverrides: options.projectOverrides !== false,
+                ...(options.settlementHours === false ? {} : { threadAutoSettlementHours: true }),
+              },
             },
           },
   };
@@ -101,6 +106,15 @@ const checkout = resolveSettingsScope(
 );
 
 describe("scoped settings targets", () => {
+  it("selects one native auto-settle unit and rejects mixed capability scopes", () => {
+    const legacy = environment("Legacy", { settlementHours: false });
+
+    expect(autoSettleUnitForEnvironments([laptop, server])).toBe("hours");
+    expect(autoSettleUnitForEnvironments([legacy])).toBe("days");
+    expect(autoSettleUnitForEnvironments([legacy, server])).toBeNull();
+    expect(autoSettleUnitForEnvironments([])).toBeNull();
+  });
+
   it("uses the named environment even when a different primary is available", () => {
     const selected = selectScopedSettingsEnvironments(named, environments, laptop.environmentId);
     expect(selected.environments).toEqual([server]);
@@ -148,6 +162,79 @@ describe("scoped settings targets", () => {
 });
 
 describe("scoped settings writes", () => {
+  it("writes each server's advertised auto-settle unit without conversion", () => {
+    const legacy = environment("Legacy", { settlementHours: false });
+    const current = environment("Current");
+    const legacyScope = resolveSettingsScope({ machine: legacy.environmentId }, [], [legacy]);
+    const currentScope = resolveSettingsScope({ machine: current.environmentId }, [], [current]);
+
+    expect(
+      planScopedSettingsPatch(legacyScope, [legacy], { sidebarAutoSettleAfterDays: 3 })
+        .serverWrites[0]?.patch,
+    ).toEqual({ sidebarAutoSettleAfterDays: 3 });
+    expect(
+      planScopedSettingsPatch(currentScope, [current], { sidebarAutoSettleAfterHours: 25 })
+        .serverWrites[0]?.patch,
+    ).toEqual({ sidebarAutoSettleAfterHours: 25 });
+  });
+
+  it("writes and clears legacy project days without touching other override values", () => {
+    const legacy = environment("Server", {
+      settlementHours: false,
+      settings: {
+        sidebarAutoSettleAfterDays: 3,
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterDays: 7, defaultAutoPull: true },
+        },
+      },
+    });
+
+    expect(
+      planScopedSettingsPatch(checkout, [legacy], { sidebarAutoSettleAfterDays: 5 }).serverWrites[0]
+        ?.patch,
+    ).toEqual({
+      projectSettingsOverrides: {
+        [projectId]: { sidebarAutoSettleAfterDays: 5, defaultAutoPull: true },
+      },
+    });
+    expect(
+      planScopedSettingsClear(checkout, [legacy], ["defaultAutoPull"]).serverWrites[0]?.patch,
+    ).toEqual({
+      projectSettingsOverrides: { [projectId]: { sidebarAutoSettleAfterDays: 7 } },
+    });
+    expect(
+      planScopedSettingsClear(checkout, [legacy], ["sidebarAutoSettleAfterDays"]).serverWrites[0]
+        ?.patch,
+    ).toEqual({
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: true } },
+    });
+  });
+
+  it("writes and clears current project hours without adding days", () => {
+    const current = environment("Server", {
+      settings: {
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterHours: 12, defaultAutoPull: true },
+        },
+      },
+    });
+
+    expect(
+      planScopedSettingsPatch(checkout, [current], { sidebarAutoSettleAfterHours: 4 })
+        .serverWrites[0]?.patch,
+    ).toEqual({
+      projectSettingsOverrides: {
+        [projectId]: { sidebarAutoSettleAfterHours: 4, defaultAutoPull: true },
+      },
+    });
+    expect(
+      planScopedSettingsClear(checkout, [current], ["sidebarAutoSettleAfterHours"]).serverWrites[0]
+        ?.patch,
+    ).toEqual({
+      projectSettingsOverrides: { [projectId]: { defaultAutoPull: true } },
+    });
+  });
+
   it("edits the effective machine policy without changing other machines' rules", () => {
     const custom = environment("Laptop", {
       settings: {

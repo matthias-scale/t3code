@@ -36,7 +36,7 @@ function formatValue(key: keyof ServerSettings, value: unknown): string {
   if (value === null || value === undefined) {
     return key === "pullRequestMergeMethod"
       ? "Last selected"
-      : key === "sidebarAutoSettleAfterDays"
+      : key === "sidebarAutoSettleAfterHours" || key === "sidebarAutoSettleAfterDays"
         ? "Never"
         : key === "defaultModelSelection"
           ? "Automatic"
@@ -46,9 +46,13 @@ function formatValue(key: keyof ServerSettings, value: unknown): string {
   }
   if (typeof value === "boolean") return value ? "On" : "Off";
   if (typeof value === "number") {
-    return key === "sidebarAutoSettleAfterDays"
-      ? `${value} ${value === 1 ? "day" : "days"}`
-      : String(value);
+    return key === "sidebarAutoSettleAfterHours"
+      ? value % 24 === 0
+        ? `${value / 24} ${value === 24 ? "day" : "days"}`
+        : `${value} ${value === 1 ? "hour" : "hours"}`
+      : key === "sidebarAutoSettleAfterDays"
+        ? `${value} ${value === 1 ? "day" : "days"}`
+        : String(value);
   }
   if (typeof value === "string") {
     if (key === "defaultThreadEnvMode" && (value === "local" || value === "worktree")) {

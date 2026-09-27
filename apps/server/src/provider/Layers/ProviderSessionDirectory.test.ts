@@ -178,6 +178,80 @@ it.layer(makeDirectoryLayer(SqlitePersistenceMemory))("ProviderSessionDirectoryL
     }),
   );
 
+  it.effect("updates only a stopped binding for the same provider session", () =>
+    Effect.gen(function* () {
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = ThreadId.make("thread-conditional-cursor-update");
+      const binding = {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        threadId,
+      };
+      yield* directory.upsert({
+        ...binding,
+        status: "stopped",
+        resumeCursor: { threadId: "imported-session" },
+      });
+
+      yield* directory.upsert(
+        {
+          ...binding,
+          resumeCursor: { threadId: "imported-session", homePath: "/tmp/codex-extra" },
+        },
+        { onConflict: "updateStoppedMatchingSession" },
+      );
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor).toEqual({
+        threadId: "imported-session",
+        homePath: "/tmp/codex-extra",
+      });
+
+      yield* directory.upsert({
+        ...binding,
+        status: "running",
+        resumeCursor: { threadId: "newer-session" },
+      });
+      yield* directory.upsert(
+        {
+          ...binding,
+          resumeCursor: { threadId: "imported-session", homePath: "/tmp/stale-home" },
+        },
+        { onConflict: "updateStoppedMatchingSession" },
+      );
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId))).toMatchObject({
+        status: "running",
+        resumeCursor: { threadId: "newer-session" },
+      });
+
+      yield* directory.upsert({
+        ...binding,
+        status: "stopped",
+        resumeCursor: { threadId: "newer-session" },
+      });
+      yield* directory.upsert(
+        {
+          ...binding,
+          resumeCursor: { threadId: "imported-session", homePath: "/tmp/stale-home" },
+        },
+        { onConflict: "updateStoppedMatchingSession" },
+      );
+      expect(Option.getOrThrow(yield* directory.getBinding(threadId))).toMatchObject({
+        status: "stopped",
+        resumeCursor: { threadId: "newer-session" },
+      });
+
+      const missingThreadId = ThreadId.make("thread-conditional-cursor-missing");
+      yield* directory.upsert(
+        {
+          ...binding,
+          threadId: missingThreadId,
+          resumeCursor: { threadId: "imported-session", homePath: "/tmp/stale-home" },
+        },
+        { onConflict: "updateStoppedMatchingSession" },
+      );
+      expect(Option.isNone(yield* directory.getBinding(missingThreadId))).toBe(true);
+    }),
+  );
+
   it.effect("records source files without replacing the current provider session", () =>
     Effect.gen(function* () {
       const directory = yield* ProviderSessionDirectory;

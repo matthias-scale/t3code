@@ -7,14 +7,238 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  type OrchestrationReadModel,
+  type OrchestrationThread,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { manualImportedTitleSyncPolicy } from "./ImportedTitleSyncPolicy.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
 
+function makeImportedReadModel(
+  settledOverride: OrchestrationThread["settledOverride"],
+  settledAt: string | null,
+): OrchestrationReadModel {
+  const createdAt = "2026-08-24T10:00:00.000Z";
+  const threadId = ThreadId.make("import:claudeAgent:session-boundary");
+  return {
+    ...createEmptyReadModel(createdAt),
+    threads: [
+      {
+        id: threadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Imported thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-5",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        pullRequests: [],
+        latestTurn: null,
+        createdAt,
+        updatedAt: settledAt ?? createdAt,
+        archivedAt: null,
+        settledOverride,
+        settledAt,
+        snoozedUntil: null,
+        snoozedAt: null,
+        deletedAt: null,
+        messages: [
+          {
+            id: MessageId.make(`${threadId}:000000`),
+            role: "user",
+            text: "First prompt",
+            turnId: null,
+            streaming: false,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        ],
+        proposedPlans: [],
+        activities: [],
+        checkpoints: [],
+        session: null,
+      },
+    ],
+  };
+}
+
 it.layer(NodeServices.layer)("thread history import", (it) => {
+  it.effect("allows imported title sync for only repairable manual titles", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("import:codex:manual-title");
+      const makeReadModel = (title: string) => ({
+        ...createEmptyReadModel("2026-08-24T10:00:00.000Z"),
+        threads: [
+          {
+            id: threadId,
+            projectId: ProjectId.make("project-1"),
+            title,
+            titleState: {
+              source: "manual" as const,
+              version: CommandId.make("manual-title"),
+              needsRefinement: false,
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access" as const,
+            interactionMode: "default" as const,
+            branch: null,
+            worktreePath: null,
+            pullRequests: [],
+            latestTurn: null,
+            createdAt: "2026-08-24T10:00:00.000Z",
+            updatedAt: "2026-08-24T10:00:00.000Z",
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            snoozedUntil: null,
+            snoozedAt: null,
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          },
+        ],
+      });
+      const decideSync = (
+        currentTitle: string,
+        title: string,
+        expectedTitle = currentTitle,
+        expectedVersion = CommandId.make("manual-title"),
+      ) =>
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.title.import.sync",
+            commandId: CommandId.make(`sync-${expectedTitle}`),
+            threadId,
+            expectedTitle,
+            expectedVersion,
+            title,
+          },
+          readModel: makeReadModel(currentTitle),
+        });
+
+      for (const [expectedTitle, title] of [
+        ["● Herdr ub2:t3:2 # AGENTS.md instructions", "● Herdr ub2:t3:2 Fixed title"],
+        ["<environment_context>", "Fixed title"],
+      ] as const) {
+        expect(yield* decideSync(expectedTitle, title)).toMatchObject({
+          type: "thread.meta-updated",
+          payload: { title },
+        });
+      }
+
+      const error = yield* Effect.flip(decideSync("Custom manual title", "Fixed title"));
+      expect(error._tag).toBe("OrchestrationCommandInvariantError");
+
+      const markedTitle = "● Herdr ub2:t3:2 Existing title";
+      for (const race of [
+        decideSync(markedTitle, "● Herdr ub2:t3:2 Fixed title", "Stale title"),
+        decideSync(
+          markedTitle,
+          "● Herdr ub2:t3:2 Fixed title",
+          markedTitle,
+          CommandId.make("stale-version"),
+        ),
+        decideSync(markedTitle, "Fixed title"),
+      ]) {
+        expect((yield* Effect.flip(race))._tag).toBe("OrchestrationCommandInvariantError");
+      }
+    }),
+  );
+
+  it.effect("retains a Herdr marker across consecutive imported title syncs", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("import:codex:marked-title");
+      const makeReadModel = (title: string): OrchestrationReadModel => ({
+        ...createEmptyReadModel("2026-08-24T10:00:00.000Z"),
+        threads: [
+          {
+            id: threadId,
+            projectId: ProjectId.make("project-1"),
+            title,
+            titleState: {
+              source: "manual",
+              version: CommandId.make("manual-title"),
+              needsRefinement: false,
+            },
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            pullRequests: [],
+            latestTurn: null,
+            createdAt: "2026-08-24T10:00:00.000Z",
+            updatedAt: "2026-08-24T10:00:00.000Z",
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            snoozedUntil: null,
+            snoozedAt: null,
+            deletedAt: null,
+            messages: [],
+            proposedPlans: [],
+            activities: [],
+            checkpoints: [],
+            session: null,
+          },
+        ],
+      });
+      const decideProviderSync = (
+        readModel: OrchestrationReadModel,
+        providerTitle: string,
+        commandId: CommandId,
+      ) => {
+        const thread = readModel.threads[0]!;
+        const policy =
+          thread.titleState?.source === "manual"
+            ? manualImportedTitleSyncPolicy(thread.title)
+            : undefined;
+        return decideOrchestrationCommand({
+          command: {
+            type: "thread.title.import.sync",
+            commandId,
+            threadId,
+            title: `${policy?.prefix ?? ""}${providerTitle}`,
+            expectedTitle: thread.title,
+            expectedVersion: thread.titleState?.version ?? null,
+          },
+          readModel,
+        });
+      };
+
+      let readModel = makeReadModel("● Herdr ub2:t3:2 Existing title");
+      const first = yield* decideProviderSync(
+        readModel,
+        "First provider title",
+        CommandId.make("first-provider-sync"),
+      );
+      const firstEvent = Array.isArray(first) ? first[0]! : first;
+      readModel = yield* projectEvent(readModel, { ...firstEvent, sequence: 1 });
+      const second = yield* decideProviderSync(
+        readModel,
+        "Second provider title",
+        CommandId.make("second-provider-sync"),
+      );
+
+      expect(second).toMatchObject({
+        type: "thread.meta-updated",
+        payload: {
+          title: "● Herdr ub2:t3:2 Second provider title",
+          titleState: { source: "manual" },
+        },
+      });
+    }),
+  );
+
   it.effect("marks imported thread creation without changing live creation", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:00:00.000Z";
@@ -75,7 +299,7 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
     }),
   );
 
-  it.effect("settles imported messages at the latest absolute timestamp", () =>
+  it.effect("leaves an imported thread active", () =>
     Effect.gen(function* () {
       const createdAt = "2026-08-24T10:30:00.000+02:00";
       const threadId = ThreadId.make("import:codex:session-1");
@@ -138,15 +362,6 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
           metadata: { historyImport: true },
           payload: { role: "assistant", text: "Fixed", turnId: null, streaming: false },
         },
-        {
-          type: "thread.settled",
-          metadata: { historyImport: true },
-          occurredAt: "2026-08-24T09:00:00.000Z",
-          payload: {
-            settledAt: "2026-08-24T09:00:00.000Z",
-            updatedAt: "2026-08-24T09:00:00.000Z",
-          },
-        },
       ]);
 
       let projected = readModel;
@@ -171,6 +386,201 @@ it.layer(NodeServices.layer)("thread history import", (it) => {
         "Fix the bug",
         "Fixed",
       ]);
+      expect(projected.threads[0]?.settledAt).toBeNull();
+      expect(projected.threads[0]?.settledOverride).toBeNull();
+    }),
+  );
+
+  it.effect("wakes a manually settled imported thread when appended history is newer", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-08-24T10:00:00.000Z";
+      const settledAt = "2026-08-24T10:01:00.000Z";
+      const threadId = ThreadId.make("import:claudeAgent:session-append");
+      let readModel = yield* projectEvent(createEmptyReadModel(createdAt), {
+        sequence: 1,
+        eventId: EventId.make("event-append-thread-created"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.created",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-append-thread-created"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-append-thread-created"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-1"),
+          title: "Imported thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-5",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      readModel = yield* projectEvent(readModel, {
+        sequence: 2,
+        eventId: EventId.make("event-existing-imported-message"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.message-sent",
+        occurredAt: createdAt,
+        commandId: CommandId.make("command-existing-imported-message"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-existing-imported-message"),
+        metadata: { historyImport: true },
+        payload: {
+          threadId,
+          messageId: MessageId.make(`${threadId}:000000`),
+          role: "user",
+          text: "First prompt",
+          turnId: null,
+          streaming: false,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      });
+      readModel = yield* projectEvent(readModel, {
+        sequence: 3,
+        eventId: EventId.make("event-existing-import-settled"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        type: "thread.settled",
+        occurredAt: settledAt,
+        commandId: CommandId.make("command-existing-import-settled"),
+        causationEventId: null,
+        correlationId: CommandId.make("command-existing-import-settled"),
+        metadata: {},
+        payload: { threadId, settledAt, updatedAt: settledAt },
+      });
+
+      const events = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.history.append",
+          commandId: CommandId.make("command-append-history"),
+          threadId,
+          messages: [
+            {
+              messageId: MessageId.make(`${threadId}:000001`),
+              role: "assistant",
+              text: "Older answer",
+              createdAt: "2026-08-24T10:00:30.000Z",
+            },
+            {
+              messageId: MessageId.make(`${threadId}:000002`),
+              role: "assistant",
+              text: "Later answer",
+              createdAt: "2026-08-24T10:02:00.000Z",
+            },
+          ],
+        },
+        readModel,
+      });
+
+      expect(events).toMatchObject([
+        {
+          type: "thread.unsettled",
+          payload: {
+            threadId,
+            reason: "activity",
+            updatedAt: "2026-08-24T10:02:00.000Z",
+          },
+        },
+        {
+          type: "thread.message-sent",
+          metadata: { historyImport: true },
+          payload: {
+            messageId: `${threadId}:000001`,
+            role: "assistant",
+            text: "Older answer",
+            turnId: null,
+            streaming: false,
+          },
+        },
+        {
+          type: "thread.message-sent",
+          metadata: { historyImport: true },
+          payload: {
+            messageId: `${threadId}:000002`,
+            role: "assistant",
+            text: "Later answer",
+            turnId: null,
+            streaming: false,
+          },
+        },
+      ]);
+      let projected = readModel;
+      for (const [index, event] of (Array.isArray(events) ? events : [events]).entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 4 });
+      }
+      expect(projected.threads[0]?.messages.map((message) => message.text)).toEqual([
+        "First prompt",
+        "Older answer",
+        "Later answer",
+      ]);
+      expect(projected.threads[0]?.settledAt).toBeNull();
+      expect(projected.threads[0]?.settledOverride).toBeNull();
+    }),
+  );
+
+  it.effect("does not wake for old history or threads that are not settled", () =>
+    Effect.gen(function* () {
+      const settledAt = "2026-08-24T10:01:00.000Z";
+      const threadId = ThreadId.make("import:claudeAgent:session-boundary");
+      const cases = [
+        {
+          suffix: "000001",
+          createdAt: "2026-08-24T10:00:59.000Z",
+          settledOverride: "settled",
+          settledAt,
+        },
+        {
+          suffix: "000002",
+          createdAt: settledAt,
+          settledOverride: "settled",
+          settledAt,
+        },
+        {
+          suffix: "000003",
+          createdAt: "2026-08-24T10:02:00.000Z",
+          settledOverride: "active",
+          settledAt: null,
+        },
+        {
+          suffix: "000004",
+          createdAt: "2026-08-24T10:02:00.000Z",
+          settledOverride: null,
+          settledAt: null,
+        },
+      ] as const;
+
+      for (const testCase of cases) {
+        const events = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.history.append",
+            commandId: CommandId.make(`command-append-${testCase.suffix}`),
+            threadId,
+            messages: [
+              {
+                messageId: MessageId.make(`${threadId}:${testCase.suffix}`),
+                role: "assistant",
+                text: "Synced answer",
+                createdAt: testCase.createdAt,
+              },
+            ],
+          },
+          readModel: makeImportedReadModel(testCase.settledOverride, testCase.settledAt),
+        });
+
+        expect((Array.isArray(events) ? events : [events]).map((event) => event.type)).toEqual([
+          "thread.message-sent",
+        ]);
+      }
     }),
   );
 

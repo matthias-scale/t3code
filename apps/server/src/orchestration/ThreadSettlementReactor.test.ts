@@ -330,7 +330,7 @@ describe("ThreadSettlementReactor", () => {
     const never = ThreadSettlementReactor.autoSettlementSettingsKey({
       ...DEFAULT_SERVER_SETTINGS,
       projectSettingsOverrides: {
-        [PROJECT_ID]: { sidebarAutoSettleOnMerge: true, sidebarAutoSettleAfterDays: null },
+        [PROJECT_ID]: { sidebarAutoSettleOnMerge: true, sidebarAutoSettleAfterHours: null },
       },
     });
     assert.notStrictEqual(inherits, never);
@@ -520,7 +520,7 @@ describe("ThreadSettlementReactor", () => {
           ),
           settings: {
             ...DEFAULT_SERVER_SETTINGS,
-            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleAfterHours: null,
             sidebarAutoSettleOnMerge: true,
           },
           branchPullRequest: ({ branch }, options) =>
@@ -570,7 +570,7 @@ describe("ThreadSettlementReactor", () => {
           ]),
           settings: {
             ...DEFAULT_SERVER_SETTINGS,
-            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleAfterHours: null,
             sidebarAutoSettleOnMerge: false,
           },
         });
@@ -595,7 +595,7 @@ describe("ThreadSettlementReactor", () => {
           assert.deepStrictEqual(yield* Ref.get(fixture.commands), []);
           assert.strictEqual(yield* Ref.get(fixture.snapshotReadCount), 0);
 
-          yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 1 });
+          yield* fixture.updateSettings({ sidebarAutoSettleAfterHours: 24 });
           yield* Queue.take(fixture.snapshotReads);
           yield* reactor.drain;
           // Inactive threads settle without a PR lookup, so only the dispatches prove work resumed.
@@ -623,10 +623,10 @@ describe("ThreadSettlementReactor", () => {
           ),
           settings: {
             ...DEFAULT_SERVER_SETTINGS,
-            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleAfterHours: null,
             sidebarAutoSettleOnMerge: false,
             projectSettingsOverrides: {
-              [overriddenProject]: { sidebarAutoSettleAfterDays: 1 },
+              [overriddenProject]: { sidebarAutoSettleAfterHours: 1 },
             },
           },
         });
@@ -646,7 +646,7 @@ describe("ThreadSettlementReactor", () => {
           // Clearing the override is a settlement change, so the sweep re-arms.
           yield* fixture.updateSettings({
             projectSettingsOverrides: { [overriddenProject]: null },
-            sidebarAutoSettleAfterDays: 1,
+            sidebarAutoSettleAfterHours: 1,
           });
           yield* Queue.take(fixture.snapshotReads);
           yield* reactor.drain;
@@ -655,6 +655,54 @@ describe("ThreadSettlementReactor", () => {
           assert.include(
             (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
             ThreadId.make("inherits-thread"),
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("re-settles a woken imported thread after four hours of inactivity", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("import:codex:woken-idle", {
+              settledOverride: null,
+              settledAt: null,
+              unsettledAt: "2026-08-28T07:00:00.000Z",
+              latestUserMessageAt: null,
+              latestImportedMessageAt: "2026-08-28T07:00:00.000Z",
+              // Title sync is not activity and must not reset the import anchor.
+              updatedAt: "2026-08-28T11:00:00.000Z",
+            }),
+            makeThread("import:codex:recent", {
+              latestUserMessageAt: null,
+              latestImportedMessageAt: "2026-08-28T09:00:00.000Z",
+              updatedAt: "2026-08-28T11:00:00.000Z",
+            }),
+          ]),
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sidebarAutoSettleAfterHours: 4,
+            sidebarAutoSettleOnMerge: false,
+          },
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.commands)).map((command) => ({
+              threadId: command.threadId,
+              settledAt: command.settledAt,
+            })),
+            [
+              {
+                threadId: ThreadId.make("import:codex:woken-idle"),
+                settledAt: "2026-08-28T07:00:00.000Z",
+              },
+            ],
           );
         }).pipe(Effect.provide(fixture.layer));
       }),
@@ -687,7 +735,7 @@ describe("ThreadSettlementReactor", () => {
               makeThread("inactive", { branch: "inactive-feature" }),
               makeThread("closed-pr", {
                 linkedPullRequest,
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
               ...skipped,
             ],
@@ -720,7 +768,7 @@ describe("ThreadSettlementReactor", () => {
               {
                 threadId: ThreadId.make("closed-pr"),
                 snapshotSequence: 1,
-                settledAt: "2026-08-27T00:00:00.000Z",
+                settledAt: "2026-08-28T06:00:00.000Z",
               },
               {
                 threadId: ThreadId.make("inactive"),
@@ -747,11 +795,11 @@ describe("ThreadSettlementReactor", () => {
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
             makeThread("at-boundary", {
-              latestUserMessageAt: "2026-08-25T12:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T00:00:00.000Z",
             }),
             makeThread("open-pr", {
               branch: "saved-feature",
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T06:00:00.000Z",
             }),
           ]),
           branchPullRequest: () =>
@@ -791,7 +839,7 @@ describe("ThreadSettlementReactor", () => {
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
             makeThread("merged-in-app", {
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T10:00:00.000Z",
               linkedPullRequest: {
                 projectId: PROJECT_ID,
                 repository: "owner/repository",
@@ -801,7 +849,7 @@ describe("ThreadSettlementReactor", () => {
             }),
             makeThread("slow-periodic-lookup", {
               branch: "another-feature",
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T10:00:00.000Z",
             }),
           ]),
           branchPullRequest: () =>
@@ -821,7 +869,7 @@ describe("ThreadSettlementReactor", () => {
         yield* Effect.gen(function* () {
           const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
           yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
-          yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 4 });
+          yield* fixture.updateSettings({ sidebarAutoSettleAfterHours: 4 });
           yield* Deferred.await(periodicLookupStarted);
 
           yield* fixture.publishMerge;
@@ -850,7 +898,7 @@ describe("ThreadSettlementReactor", () => {
             snapshot: makeSnapshot([
               makeThread("branch-thread", {
                 branch: "saved-feature",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
             ]),
             branchPullRequest: () =>
@@ -892,7 +940,7 @@ describe("ThreadSettlementReactor", () => {
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
             makeThread("merged-in-app", {
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               linkedPullRequest: {
                 projectId: PROJECT_ID,
                 repository: "owner/repository",
@@ -901,7 +949,7 @@ describe("ThreadSettlementReactor", () => {
               },
             }),
             makeThread("unrelated-linked", {
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               linkedPullRequest: {
                 projectId: PROJECT_ID,
                 repository: "owner/repository",
@@ -971,7 +1019,7 @@ describe("ThreadSettlementReactor", () => {
           ]),
           settings: {
             ...DEFAULT_SERVER_SETTINGS,
-            sidebarAutoSettleAfterDays: null,
+            sidebarAutoSettleAfterHours: null,
             sidebarAutoSettleOnMerge: true,
           },
           branchPullRequest: () =>
@@ -1014,7 +1062,7 @@ describe("ThreadSettlementReactor", () => {
 
           yield* Ref.set(state, "closed");
           yield* fixture.updateSettings({ enableAgentBrowserAccess: false });
-          yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 1 });
+          yield* fixture.updateSettings({ sidebarAutoSettleAfterHours: 24 });
           yield* Deferred.await(laterLookupStarted);
           yield* Deferred.succeed(releaseLaterLookup, undefined);
           yield* reactor.drain;
@@ -1038,7 +1086,7 @@ describe("ThreadSettlementReactor", () => {
           snapshot: makeSnapshot(
             [
               makeThread("lookup-failed", {
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
                 linkedPullRequest: {
                   projectId: LINKED_PROJECT_ID,
                   repository: "owner/repository",
@@ -1150,7 +1198,7 @@ describe("ThreadSettlementReactor", () => {
           snapshot: makeSnapshot([
             makeThread("recent-linked", {
               linkedPullRequest,
-              latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+              latestUserMessageAt: "2026-08-28T06:00:00.000Z",
             }),
             makeThread("inactive-linked", { linkedPullRequest }),
           ]),
@@ -1202,12 +1250,12 @@ describe("ThreadSettlementReactor", () => {
           snapshot: makeSnapshot(
             [
               makeThread("missing-own-project", {
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
                 linkedPullRequest,
               }),
               makeThread("missing-branch-project", {
                 branch: "saved-feature",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
             ],
             [makeProject(LINKED_PROJECT_ID, "/workspace/linked")],
@@ -1246,20 +1294,20 @@ describe("ThreadSettlementReactor", () => {
               makeThread("branch-one", {
                 branch: "saved-feature",
                 worktreePath: "/deleted/worktree-one",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
               makeThread("branch-two", {
                 branch: "saved-feature",
                 worktreePath: "/deleted/worktree-two",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
               makeThread("linked-one", {
                 linkedPullRequest,
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
               makeThread("linked-two", {
                 linkedPullRequest,
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
             ],
             [
@@ -1306,12 +1354,12 @@ describe("ThreadSettlementReactor", () => {
               makeThread("live-worktree", {
                 branch: "feature/live",
                 worktreePath: "/workspace/project-root/.worktrees/live",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
               makeThread("deleted-worktree", {
                 branch: "feature/deleted",
                 worktreePath: "/workspace/project-root/.worktrees/deleted",
-                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                latestUserMessageAt: "2026-08-28T06:00:00.000Z",
               }),
             ],
             [makeProject(PROJECT_ID, "/workspace/project-root")],
@@ -1367,7 +1415,7 @@ describe("ThreadSettlementReactor", () => {
             true,
           );
 
-          yield* fixture.updateSettings({ sidebarAutoSettleAfterDays: 4 });
+          yield* fixture.updateSettings({ sidebarAutoSettleAfterHours: 4 });
           yield* Queue.take(fixture.snapshotReads);
           yield* reactor.drain;
           assert.strictEqual((yield* Ref.get(fixture.commands)).length, 4);

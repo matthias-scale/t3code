@@ -6,11 +6,14 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 import {
+  filterAutoSettleSettingsPatchForCapabilities,
   filterSharedServerPatch,
   findSharedSettingsMismatches,
   pickSharedServerSettings,
+  selectAutoSettleThreshold,
   splitSharedServerPatch,
   supportsSharedSettingsSync,
 } from "./sharedSettings.ts";
@@ -18,7 +21,10 @@ import {
 const primaryId = EnvironmentId.make("env-primary");
 const laptopId = EnvironmentId.make("env-laptop");
 const boxId = EnvironmentId.make("env-box");
-const restartCapabilities = { threadRestartContinuation: true };
+const restartCapabilities = {
+  threadRestartContinuation: true,
+  threadAutoSettlementHours: true,
+};
 
 describe("supportsSharedSettingsSync", () => {
   it("accepts only connected servers that advertise the shared-settings capability", () => {
@@ -98,7 +104,7 @@ describe("splitSharedServerPatch", () => {
 
   it("routes preference keys to the shared patch and machine keys to the local patch", () => {
     const { sharedPatch, localPatch } = splitSharedServerPatch({
-      sidebarAutoSettleAfterDays: 7,
+      sidebarAutoSettleAfterHours: 7,
       sidebarAutoSettleOnMerge: false,
       continueThreadsAfterServerUpdate: true,
       enableAgentBrowserAccess: false,
@@ -106,7 +112,7 @@ describe("splitSharedServerPatch", () => {
       newWorktreesStartFromOrigin: true,
     });
     expect(sharedPatch).toEqual({
-      sidebarAutoSettleAfterDays: 7,
+      sidebarAutoSettleAfterHours: 7,
       sidebarAutoSettleOnMerge: false,
       continueThreadsAfterServerUpdate: true,
       newWorktreesStartFromOrigin: true,
@@ -114,6 +120,13 @@ describe("splitSharedServerPatch", () => {
     expect(localPatch).toEqual({
       enableAgentBrowserAccess: false,
       defaultThreadEnvMode: "worktree",
+    });
+  });
+
+  it("routes the legacy days preference through shared settings unchanged", () => {
+    expect(splitSharedServerPatch({ sidebarAutoSettleAfterDays: 3 })).toEqual({
+      sharedPatch: { sidebarAutoSettleAfterDays: 3 },
+      localPatch: {},
     });
   });
 });
@@ -125,15 +138,115 @@ describe("pickSharedServerSettings", () => {
     ).toEqual([
       "continueThreadsAfterServerUpdate",
       "newWorktreesStartFromOrigin",
-      "sidebarAutoSettleAfterDays",
+      "sidebarAutoSettleAfterHours",
       "sidebarAutoSettleOnMerge",
       "sourceControlWritingStyle",
       "textGenerationModelSelection",
     ]);
   });
+
+  it("reads only the settlement unit advertised by the server", () => {
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      sidebarAutoSettleAfterHours: 12,
+      sidebarAutoSettleAfterDays: 3,
+    };
+    expect(pickSharedServerSettings(settings, { threadAutoSettlementHours: true })).toMatchObject({
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(
+      pickSharedServerSettings(settings, { threadAutoSettlementHours: true }),
+    ).not.toHaveProperty("sidebarAutoSettleAfterDays");
+    expect(pickSharedServerSettings(settings, {})).toMatchObject({
+      sidebarAutoSettleAfterDays: 3,
+    });
+    expect(pickSharedServerSettings(settings, {})).not.toHaveProperty(
+      "sidebarAutoSettleAfterHours",
+    );
+  });
+
+  it("reads project overrides in the server's advertised unit", () => {
+    const projectId = ProjectId.make("project");
+    const current = resolveProjectSettings(
+      {
+        ...DEFAULT_SERVER_SETTINGS,
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterHours: 4 },
+        },
+      },
+      projectId,
+    ).settings;
+    const legacy = resolveProjectSettings(
+      {
+        ...DEFAULT_SERVER_SETTINGS,
+        sidebarAutoSettleAfterDays: 3,
+        projectSettingsOverrides: {
+          [projectId]: { sidebarAutoSettleAfterDays: 7 },
+        },
+      },
+      projectId,
+    ).settings;
+
+    expect(selectAutoSettleThreshold(current, { threadAutoSettlementHours: true })).toEqual({
+      key: "sidebarAutoSettleAfterHours",
+      value: 4,
+    });
+    expect(selectAutoSettleThreshold(legacy, {})).toEqual({
+      key: "sidebarAutoSettleAfterDays",
+      value: 7,
+    });
+  });
 });
 
 describe("filterSharedServerPatch", () => {
+  it("keeps only the settlement unit advertised by the target", () => {
+    const patch = { sidebarAutoSettleAfterHours: 25, sidebarAutoSettleAfterDays: 3 };
+    expect(filterSharedServerPatch(patch, {})).toEqual({ sidebarAutoSettleAfterDays: 3 });
+    expect(filterSharedServerPatch(patch, { threadAutoSettlementHours: true })).toEqual({
+      sidebarAutoSettleAfterHours: 25,
+    });
+  });
+
+  it("never sends hours to an old server or overwrites its stored days", () => {
+    const stored = { sidebarAutoSettleAfterDays: 3, sidebarAutoSettleOnMerge: true };
+    const patch = filterSharedServerPatch(
+      { sidebarAutoSettleAfterHours: 12, sidebarAutoSettleOnMerge: false },
+      {},
+    );
+
+    expect(patch).toEqual({ sidebarAutoSettleOnMerge: false });
+    expect(patch).not.toHaveProperty("sidebarAutoSettleAfterHours");
+    expect({ ...stored, ...patch }).toEqual({
+      sidebarAutoSettleAfterDays: 3,
+      sidebarAutoSettleOnMerge: false,
+    });
+  });
+
+  it("gates complete project override entries without converting values", () => {
+    const projectId = ProjectId.make("project");
+    expect(
+      filterAutoSettleSettingsPatchForCapabilities(
+        {
+          sidebarAutoSettleAfterHours: 12,
+          sidebarAutoSettleAfterDays: 3,
+          projectSettingsOverrides: {
+            [projectId]: {
+              sidebarAutoSettleAfterHours: null,
+              sidebarAutoSettleAfterDays: 7,
+              defaultAutoPull: true,
+            },
+          },
+        },
+        {},
+      ),
+    ).toEqual({
+      sidebarAutoSettleAfterDays: 3,
+      projectSettingsOverrides: {
+        [projectId]: { sidebarAutoSettleAfterDays: 7, defaultAutoPull: true },
+      },
+    });
+  });
+
   it.each([true, false])(
     "resets a disabled default provider only on the originating environment (%s)",
     (targetIsSource) => {
@@ -155,16 +268,22 @@ describe("filterSharedServerPatch", () => {
       const patch = {
         textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
         continueThreadsAfterServerUpdate: true,
-        sidebarAutoSettleAfterDays: 7,
+        sidebarAutoSettleAfterHours: 7,
       };
-      expect(filterSharedServerPatch(patch, undefined, settings, settings, targetIsSource)).toEqual(
-        {
-          ...(targetIsSource
-            ? { textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection }
-            : {}),
-          sidebarAutoSettleAfterDays: 7,
-        },
-      );
+      expect(
+        filterSharedServerPatch(
+          patch,
+          { threadAutoSettlementHours: true },
+          settings,
+          settings,
+          targetIsSource,
+        ),
+      ).toEqual({
+        ...(targetIsSource
+          ? { textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection }
+          : {}),
+        sidebarAutoSettleAfterHours: 7,
+      });
     },
   );
 
@@ -188,7 +307,7 @@ describe("filterSharedServerPatch", () => {
         ...DEFAULT_SERVER_SETTINGS,
         providerInstances: availability === "missing" ? {} : { [instanceId]: instance },
       };
-      const patch = { sidebarAutoSettleAfterDays: 7, textGenerationModelSelection: selection };
+      const patch = { sidebarAutoSettleAfterHours: 7, textGenerationModelSelection: selection };
       const sourceSettings = {
         ...settings,
         providerInstances: {
@@ -196,7 +315,7 @@ describe("filterSharedServerPatch", () => {
         },
       };
       expect(filterSharedServerPatch(patch, restartCapabilities, settings, sourceSettings)).toEqual(
-        availability === "enabled" ? patch : { sidebarAutoSettleAfterDays: 7 },
+        availability === "enabled" ? patch : { sidebarAutoSettleAfterHours: 7 },
       );
       const primarySettings = {
         ...sourceSettings,
@@ -215,7 +334,7 @@ describe("filterSharedServerPatch", () => {
   );
 
   it.each([true, false])("preserves supported restart preference %s", (enabled) => {
-    const patch = { continueThreadsAfterServerUpdate: enabled, sidebarAutoSettleAfterDays: 7 };
+    const patch = { continueThreadsAfterServerUpdate: enabled, sidebarAutoSettleAfterHours: 7 };
     expect(filterSharedServerPatch(patch, restartCapabilities)).toEqual(patch);
   });
 
@@ -224,10 +343,10 @@ describe("filterSharedServerPatch", () => {
     (capabilities) => {
       expect(
         filterSharedServerPatch(
-          { continueThreadsAfterServerUpdate: true, sidebarAutoSettleAfterDays: 7 },
+          { continueThreadsAfterServerUpdate: true, sidebarAutoSettleAfterHours: 7 },
           capabilities,
         ),
-      ).toEqual({ sidebarAutoSettleAfterDays: 7 });
+      ).toEqual({});
       expect(pickSharedServerSettings(DEFAULT_SERVER_SETTINGS, capabilities)).not.toHaveProperty(
         "continueThreadsAfterServerUpdate",
       );
@@ -236,7 +355,7 @@ describe("filterSharedServerPatch", () => {
 });
 
 describe("findSharedSettingsMismatches", () => {
-  const primarySettings = { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: 7 };
+  const primarySettings = { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterHours: 7 };
 
   it.each([true, false])(
     "detects remote restart continuation drift when the preference is %s",
@@ -305,7 +424,7 @@ describe("findSharedSettingsMismatches", () => {
           environments: [
             {
               ...environment,
-              settings: { ...environment.settings, sidebarAutoSettleAfterDays: 14 },
+              settings: { ...environment.settings, sidebarAutoSettleOnMerge: false },
             },
           ],
         }),
@@ -317,24 +436,28 @@ describe("findSharedSettingsMismatches", () => {
     const mismatches = findSharedSettingsMismatches({
       primaryEnvironmentId: primaryId,
       primarySettings,
+      primaryCapabilities: restartCapabilities,
       environments: [
         {
           environmentId: primaryId,
           label: "Desktop",
           syncEligible: true,
           settings: primarySettings,
+          capabilities: restartCapabilities,
         },
         {
           environmentId: laptopId,
           label: "Laptop",
           syncEligible: true,
           settings: primarySettings,
+          capabilities: restartCapabilities,
         },
         {
           environmentId: boxId,
           label: "Remote Box",
           syncEligible: true,
           settings: DEFAULT_SERVER_SETTINGS,
+          capabilities: restartCapabilities,
         },
       ],
     });

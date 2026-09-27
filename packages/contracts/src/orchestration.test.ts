@@ -1563,6 +1563,21 @@ it.effect("rejects thread history imports without messages", () =>
   }),
 );
 
+it.effect("rejects thread history appends without messages", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decodeOrchestrationCommand({
+        type: "thread.history.append",
+        commandId: "command-empty-history-append",
+        threadId: "thread-1",
+        messages: [],
+      }),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
 it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects svg", () => {
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/png"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);

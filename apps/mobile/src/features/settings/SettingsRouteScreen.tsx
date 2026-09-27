@@ -1,3 +1,4 @@
+import { AutoSettleHoursField } from "./components/AutoSettleHoursField";
 import { AutoSettleDaysField } from "./components/AutoSettleDaysField";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAuth, useUser } from "@clerk/expo";
@@ -44,7 +45,10 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useEnvironments } from "../../state/environments";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
-import { supportsSharedSettingsSync } from "@t3tools/client-runtime/state/shared-settings";
+import {
+  selectAutoSettleThreshold,
+  supportsSharedSettingsSync,
+} from "@t3tools/client-runtime/state/shared-settings";
 import { useThreadListV2Enabled } from "../threads/use-thread-list-v2-enabled";
 import {
   type AppUpdateCheckState,
@@ -58,7 +62,11 @@ import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import { resolveAgentAwarenessPlatformPresentation } from "./SettingsRouteScreen.logic";
-import { planAutoSettleSettingsSync, type AutoSettleSettings } from "./autoSettleSettingsSync";
+import {
+  planAutoSettleSettingsSync,
+  planAutoSettleSettingsWrites,
+  type AutoSettleSettings,
+} from "./autoSettleSettingsSync";
 
 type NotificationStatus = "checking" | "enabled" | "disabled" | "unsupported";
 type LiveActivityStatus = "checking" | "enabled" | "disabled" | "signed-out" | "linking";
@@ -611,7 +619,8 @@ function GeneralSettingsSection() {
   );
 }
 
-const AUTO_SETTLE_DEFAULT_DAYS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterDays ?? 3;
+const AUTO_SETTLE_DEFAULT_HOURS = DEFAULT_SERVER_SETTINGS.sidebarAutoSettleAfterHours ?? 12;
+const AUTO_SETTLE_DEFAULT_DAYS = 3;
 
 /**
  * Mobile edits auto-settle defaults across connected, capable environments.
@@ -637,22 +646,41 @@ function AutoSettleSettingsRows() {
   const writeToAll = (patch: Partial<AutoSettleSettings>) => {
     setPendingWrites((count) => count + 1);
     void Promise.allSettled(
-      syncTargets.map((environment) =>
-        updateSettings({ environmentId: environment.environmentId, input: { patch } }),
+      planAutoSettleSettingsWrites(
+        patch,
+        syncTargets.map((environment) => ({
+          environmentId: environment.environmentId,
+          capabilities: environment.serverConfig?.environment.capabilities,
+        })),
+      ).map((write) =>
+        updateSettings({ environmentId: write.environmentId, input: { patch: write.patch } }),
       ),
     ).finally(() => setPendingWrites((count) => count - 1));
   };
 
   const { patch: autoSettlePatch, mismatches } = planAutoSettleSettingsSync(
-    { environmentId: reference.environmentId, settings: referenceSettings },
+    {
+      environmentId: reference.environmentId,
+      settings: referenceSettings,
+      capabilities: reference.serverConfig?.environment.capabilities,
+    },
     syncTargets.map((environment) => ({
       environmentId: environment.environmentId,
       label: environment.label,
       settings: environment.serverConfig?.settings ?? null,
+      capabilities: environment.serverConfig?.environment.capabilities,
     })),
   );
 
-  const afterDays = referenceSettings.sidebarAutoSettleAfterDays;
+  const selectedThreshold = selectAutoSettleThreshold(
+    referenceSettings,
+    reference.serverConfig?.environment.capabilities,
+  );
+  const supportsHours = selectedThreshold.key === "sidebarAutoSettleAfterHours";
+  const threshold =
+    selectedThreshold.value === undefined ? AUTO_SETTLE_DEFAULT_DAYS : selectedThreshold.value;
+  const thresholdPatch = (value: number | null): Partial<AutoSettleSettings> =>
+    supportsHours ? { sidebarAutoSettleAfterHours: value } : { sidebarAutoSettleAfterDays: value };
 
   return (
     <>
@@ -665,12 +693,16 @@ function AutoSettleSettingsRows() {
       <SettingsSwitchRow
         icon="clock"
         label="Auto-settle inactive threads"
-        value={afterDays !== null}
+        value={threshold !== null}
         onValueChange={(value) =>
-          writeToAll({ sidebarAutoSettleAfterDays: value ? AUTO_SETTLE_DEFAULT_DAYS : null })
+          writeToAll(
+            thresholdPatch(
+              value ? (supportsHours ? AUTO_SETTLE_DEFAULT_HOURS : AUTO_SETTLE_DEFAULT_DAYS) : null,
+            ),
+          )
         }
       />
-      {afterDays !== null ? (
+      {threshold !== null ? (
         <View
           className={cn(
             "flex-row items-center gap-4 px-4",
@@ -684,12 +716,19 @@ function AutoSettleSettingsRows() {
               Platform.OS === "android" ? "text-base" : "text-lg",
             )}
           >
-            Inactive days
+            {supportsHours ? "Inactive hours" : "Inactive days"}
           </Text>
-          <AutoSettleDaysField
-            value={afterDays}
-            onValueChange={(value) => writeToAll({ sidebarAutoSettleAfterDays: value })}
-          />
+          {supportsHours ? (
+            <AutoSettleHoursField
+              value={threshold}
+              onValueChange={(value) => writeToAll(thresholdPatch(value))}
+            />
+          ) : (
+            <AutoSettleDaysField
+              value={threshold}
+              onValueChange={(value) => writeToAll(thresholdPatch(value))}
+            />
+          )}
         </View>
       ) : null}
       {pendingWrites === 0 && mismatches.length > 0 ? (

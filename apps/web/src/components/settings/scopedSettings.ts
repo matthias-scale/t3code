@@ -10,6 +10,7 @@ import {
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import { filterAutoSettleSettingsPatchForCapabilities } from "@t3tools/client-runtime/state/shared-settings";
 import {
   clearProjectSettingsOverrides,
   resolveProjectSettings,
@@ -29,9 +30,35 @@ interface ScopedSettingsEnvironment {
   readonly serverConfig: {
     readonly settings: ServerSettings;
     readonly environment?: {
-      readonly capabilities: { readonly projectSettingsOverrides?: boolean | undefined };
+      readonly capabilities: {
+        readonly projectSettingsOverrides?: boolean | undefined;
+        readonly threadAutoSettlementHours?: boolean | undefined;
+      };
     };
   } | null;
+}
+
+export function autoSettleUnitForEnvironments(
+  environments: readonly ScopedSettingsEnvironment[],
+): "hours" | "days" | null {
+  if (environments.length === 0) return null;
+  if (
+    environments.every(
+      (environment) =>
+        environment.serverConfig?.environment?.capabilities.threadAutoSettlementHours === true,
+    )
+  ) {
+    return "hours";
+  }
+  if (
+    environments.every(
+      (environment) =>
+        environment.serverConfig?.environment?.capabilities.threadAutoSettlementHours !== true,
+    )
+  ) {
+    return "days";
+  }
+  return null;
 }
 
 const SERVER_KEYS = new Set<string>(Object.keys(ServerSettings.fields));
@@ -152,6 +179,25 @@ interface ScopedServerWrite {
   readonly patch: ServerSettingsPatch;
 }
 
+function gateScopedServerWrites(
+  writes: readonly ScopedServerWrite[],
+  environments: readonly ScopedSettingsEnvironment[],
+): ScopedServerWrite[] {
+  const capabilitiesByEnvironmentId = new Map(
+    environments.map((environment) => [
+      environment.environmentId,
+      environment.serverConfig?.environment?.capabilities,
+    ]),
+  );
+  return writes.flatMap((write) => {
+    const patch = filterAutoSettleSettingsPatchForCapabilities(
+      write.patch,
+      capabilitiesByEnvironmentId.get(write.environmentId),
+    );
+    return Object.keys(patch).length === 0 ? [] : [{ ...write, patch }];
+  });
+}
+
 function projectOverrideWrites(
   scope: Extract<ResolvedSettingsScope, { kind: "project" | "checkout" }>,
   environments: readonly ScopedSettingsEnvironment[],
@@ -211,7 +257,7 @@ export function planScopedSettingsPatch(
   const unscopableKeys = isProjectScope
     ? serverKeys.filter((key) => !isProjectScopedSettingKey(key))
     : [];
-  const serverWrites: ScopedServerWrite[] =
+  const rawServerWrites: ScopedServerWrite[] =
     serverKeys.length === 0
       ? []
       : isProjectScope
@@ -265,6 +311,7 @@ export function planScopedSettingsPatch(
                   : serverPatch,
             }))
           : [];
+  const serverWrites = gateScopedServerWrites(rawServerWrites, environments);
   const hasClientWrite = Object.keys(clientPatch).length > 0;
   const hasWrite = hasClientWrite || serverWrites.length > 0;
   const unavailableReason =
@@ -286,12 +333,13 @@ export function planScopedSettingsClear(
   environments: readonly ScopedSettingsEnvironment[],
   keys: readonly ProjectScopedServerSettingKey[],
 ) {
-  const serverWrites =
+  const rawServerWrites =
     scope.kind === "project" || scope.kind === "checkout"
       ? projectOverrideWrites(scope, environments, (_current, settings, projectId) =>
           clearProjectSettingsOverrides(settings, projectId, keys),
         )
       : [];
+  const serverWrites = gateScopedServerWrites(rawServerWrites, environments);
   return {
     clientPatch: {} as ClientSettingsPatch,
     hasClientWrite: false,
@@ -354,7 +402,7 @@ export function planProjectOverridesClear(
       },
     });
   }
-  const serverWrites = [...writes.values()];
+  const serverWrites = gateScopedServerWrites([...writes.values()], environments);
   return {
     clientPatch: {} as ClientSettingsPatch,
     hasClientWrite: false,

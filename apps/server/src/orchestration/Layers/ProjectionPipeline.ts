@@ -636,6 +636,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             titleRegenerationRequestId: null,
             titleRegenerationStartedAt: null,
             latestUserMessageAt: null,
+            latestImportedMessageAt: null,
             pendingApprovalCount: 0,
             pendingUserInputCount: 0,
             hasActionableProposedPlan: 0,
@@ -994,9 +995,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        // A message cannot change any summary field except latestUserMessageAt,
-        // which is a monotonic maximum that folds in directly. The full refresh
-        // would re-read every message body in the thread per user message.
+        // Message activity anchors are monotonic maxima that fold in directly.
+        // A full refresh would re-read every message body for each new message.
         case "thread.message-sent": {
           const existingRow = yield* projectionThreadRepository.getById({
             threadId: event.payload.threadId,
@@ -1005,6 +1005,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             return;
           }
           const previousLatest = existingRow.value.latestUserMessageAt;
+          const previousImported = existingRow.value.latestImportedMessageAt ?? null;
+          const imported = isImportedAgentSessionMessageId(event.payload.messageId);
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             updatedAt: event.occurredAt,
@@ -1014,6 +1016,12 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               (previousLatest === null || event.payload.createdAt > previousLatest)
                 ? event.payload.createdAt
                 : previousLatest,
+            latestImportedMessageAt:
+              imported &&
+              (previousImported === null ||
+                compareDateTimeStrings(event.payload.createdAt, previousImported) > 0)
+                ? event.payload.createdAt
+                : previousImported,
           });
           return;
         }

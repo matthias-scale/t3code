@@ -40,6 +40,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -256,8 +257,51 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
 export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
   Layer.effect(ServerSettingsService, makeTest(overrides));
 
-const ServerSettingsJson = fromLenientJson(ServerSettings);
-const decodeServerSettingsJsonExit = Schema.decodeUnknownExit(ServerSettingsJson);
+const decodeRawSettingsJsonExit = Schema.decodeUnknownExit(fromLenientJson(Schema.Unknown));
+const decodeServerSettingsExit = Schema.decodeUnknownExit(ServerSettings);
+
+function migrateStoredAutoSettleEntry(value: unknown): unknown {
+  if (!Predicate.isObject(value)) return value;
+  const { sidebarAutoSettleAfterDays, ...current } = value;
+  if (
+    current.sidebarAutoSettleAfterHours !== undefined ||
+    sidebarAutoSettleAfterDays === undefined
+  ) {
+    return current;
+  }
+  return {
+    ...current,
+    sidebarAutoSettleAfterHours:
+      sidebarAutoSettleAfterDays === null || typeof sidebarAutoSettleAfterDays !== "number"
+        ? sidebarAutoSettleAfterDays
+        : sidebarAutoSettleAfterDays * 24,
+  };
+}
+
+/** Stored 0.0.42 settings migrate once; RPC snapshots keep their native unit untouched. */
+function migrateStoredAutoSettleSettings(value: unknown): unknown {
+  if (!Predicate.isObject(value)) return value;
+  const migrated = migrateStoredAutoSettleEntry(value);
+  if (!Predicate.isObject(migrated) || !Predicate.isObject(value.projectSettingsOverrides)) {
+    return migrated;
+  }
+  return {
+    ...migrated,
+    projectSettingsOverrides: Object.fromEntries(
+      Object.entries(value.projectSettingsOverrides).map(([projectId, entry]) => [
+        projectId,
+        migrateStoredAutoSettleEntry(entry),
+      ]),
+    ),
+  };
+}
+
+const decodeServerSettingsJsonExit = (raw: string) => {
+  const decoded = decodeRawSettingsJsonExit(raw);
+  return decoded._tag === "Failure"
+    ? decoded
+    : decodeServerSettingsExit(migrateStoredAutoSettleSettings(decoded.value));
+};
 const PersistedOptionalProviderSettings = Schema.Struct({
   providers: Schema.optionalKey(
     Schema.Struct({

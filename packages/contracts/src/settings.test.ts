@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -17,7 +19,9 @@ const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const encodeServerSettingsPatch = Schema.encodeSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
+const encodeUnknownServerSettings = Schema.encodeUnknownSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
 describe("storage cleanup settings", () => {
@@ -103,6 +107,23 @@ describe("ServerSettings default permissions", () => {
         projectSettingsOverrides: { project: { defaultRuntimeMode: "unsupported" } },
       }),
     ).toThrow();
+  });
+});
+
+describe("ServerSettings Codex session homes", () => {
+  it("defaults to the active Codex home and round-trips additional homes", () => {
+    expect(decodeServerSettings({}).codexAdditionalSessionHomes).toEqual([]);
+    const input = { codexAdditionalSessionHomes: ["~/.codex-personal", "/srv/codex-work"] };
+    expect(decodeServerSettings(input).codexAdditionalSessionHomes).toEqual(
+      input.codexAdditionalSessionHomes,
+    );
+    expect(encodeServerSettings(decodeServerSettings(input))).toMatchObject(input);
+    expect(decodeServerSettingsPatch(input)).toEqual(input);
+  });
+
+  it("rejects empty additional Codex homes", () => {
+    expect(() => decodeServerSettings({ codexAdditionalSessionHomes: ["  "] })).toThrow();
+    expect(() => decodeServerSettingsPatch({ codexAdditionalSessionHomes: [""] })).toThrow();
   });
 });
 
@@ -626,30 +647,72 @@ describe("ClientSettings composer collapse", () => {
 });
 
 describe("ServerSettings thread settlement", () => {
-  it("defaults merge settlement on and inactivity settlement to three days", () => {
-    const settings = decodeServerSettings({});
-    expect(settings.sidebarAutoSettleAfterDays).toBe(3);
-    expect(settings.sidebarAutoSettleOnMerge).toBe(true);
+  it("retains legacy days without converting them at the wire boundary", () => {
+    expect(decodeServerSettings({}).sidebarAutoSettleAfterHours).toBe(12);
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: 3 })).toMatchObject({
+      sidebarAutoSettleAfterDays: 3,
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: null })).toMatchObject({
+      sidebarAutoSettleAfterDays: null,
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(decodeServerSettings({ sidebarAutoSettleAfterDays: 1.1 })).toMatchObject({
+      sidebarAutoSettleAfterDays: 1.1,
+      sidebarAutoSettleAfterHours: 12,
+    });
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: {
+          project: { sidebarAutoSettleAfterDays: 7 },
+          disabled: { sidebarAutoSettleAfterDays: null },
+        },
+      }).projectSettingsOverrides,
+    ).toMatchObject({
+      project: { sidebarAutoSettleAfterDays: 7 },
+      disabled: { sidebarAutoSettleAfterDays: null },
+    });
   });
 
   it("allows both automatic rules to be disabled", () => {
     expect(
       decodeServerSettings({
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
       }),
-    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
+    ).toMatchObject({ sidebarAutoSettleAfterHours: null, sidebarAutoSettleOnMerge: false });
     expect(
       decodeServerSettingsPatch({
-        sidebarAutoSettleAfterDays: null,
+        sidebarAutoSettleAfterHours: null,
         sidebarAutoSettleOnMerge: false,
       }),
-    ).toMatchObject({ sidebarAutoSettleAfterDays: null, sidebarAutoSettleOnMerge: false });
+    ).toMatchObject({ sidebarAutoSettleAfterHours: null, sidebarAutoSettleOnMerge: false });
   });
 
-  it.each([-1, 0, 91])("rejects an auto-settle threshold outside 1..90: %s", (value) => {
-    expect(() => decodeServerSettings({ sidebarAutoSettleAfterDays: value })).toThrow();
-    expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterDays: value })).toThrow();
+  it("preserves legacy day patches through RPC encoding", () => {
+    const patch = decodeServerSettingsPatch({
+      sidebarAutoSettleAfterDays: 2,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterDays: null },
+      },
+    });
+    expect(encodeServerSettingsPatch(patch)).toEqual({
+      sidebarAutoSettleAfterDays: 2,
+      projectSettingsOverrides: {
+        project: { sidebarAutoSettleAfterDays: null },
+      },
+    });
+  });
+
+  it("encodes current settings without creating the legacy days key", () => {
+    expect(encodeUnknownServerSettings({ sidebarAutoSettleAfterHours: 24 })).toEqual({
+      sidebarAutoSettleAfterHours: 24,
+    });
+  });
+
+  it.each([-1, 0, 2161])("rejects an auto-settle threshold outside 1..2160 hours: %s", (value) => {
+    expect(() => decodeServerSettings({ sidebarAutoSettleAfterHours: value })).toThrow();
+    expect(() => decodeServerSettingsPatch({ sidebarAutoSettleAfterHours: value })).toThrow();
   });
 });
 
