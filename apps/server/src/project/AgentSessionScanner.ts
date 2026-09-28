@@ -14,6 +14,8 @@
  * @module project/AgentSessionScanner
  */
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect File.Info omits ctime; this replaces the discovery stat with a high-resolution one.
+import * as NodeFSP from "node:fs/promises";
 
 import {
   AgentSessionScanError,
@@ -198,6 +200,40 @@ export class AgentSessionScanner extends Context.Service<
 
 type AgentSessionSource = AgentSessionProjectCandidate["sources"][number];
 
+export interface TranscriptFileMetadata {
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
+}
+
+/** Native stat fields absent from Effect's portable File.Info shape. */
+export class TranscriptFileStat extends Context.Service<
+  TranscriptFileStat,
+  {
+    readonly stat: (filePath: string) => Effect.Effect<TranscriptFileMetadata | null>;
+  }
+>()("t3/project/AgentSessionScanner/TranscriptFileStat") {
+  static readonly layer = Layer.succeed(TranscriptFileStat, {
+    stat: (filePath) =>
+      Effect.tryPromise(() => NodeFSP.stat(filePath, { bigint: true })).pipe(
+        Effect.map((stats) =>
+          stats.isFile()
+            ? {
+                size: Number(stats.size),
+                mtimeMs: Number(stats.mtimeMs),
+                ctimeNs: stats.ctimeNs,
+                device: stats.dev,
+                inode: stats.ino,
+              }
+            : null,
+        ),
+        Effect.orElseSucceed(() => null),
+      ),
+  });
+}
+
 /** A single directory's worth of evidence from one source. */
 interface RawCandidate {
   readonly cwd: string;
@@ -216,6 +252,19 @@ interface TranscriptCandidate {
   readonly mtimeMs: number;
   readonly providerInstanceId: ProviderInstanceId;
   readonly size: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
+}
+
+interface CachedTranscriptCwd {
+  readonly source: AgentSessionSource;
+  readonly mtimeMs: number;
+  readonly size: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly cwd: string | null;
 }
 
 interface MetadataReadBudget {
@@ -618,6 +667,8 @@ function sameTranscriptIdentity(
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  const transcriptMetadata = yield* TranscriptFileStat;
+  const transcriptCwdCache = new Map<string, CachedTranscriptCwd>();
   // Different project imports can arrive concurrently from multiple clients.
   // Only one transcript may hold its selected-history budget at a time.
   const importReadLock = yield* Semaphore.make(1);
@@ -729,20 +780,12 @@ export const make = Effect.gen(function* () {
 
   // A large history snapshot can precede session metadata. Read bounded
   // chunks until a complete record names its cwd or the safety budget ends.
-  const readCwd = Effect.fn("AgentSessionScanner.readCwd")(function* (
+  const readCwdFromFile = Effect.fn("AgentSessionScanner.readCwd")(function* (
     transcript: TranscriptCandidate,
     budget: MetadataReadBudget,
   ) {
-    if (transcript.size === 0) return null;
-    if (
-      budget.bytesRemaining === 0 ||
-      budget.operationsRemaining < 2 ||
-      budget.recordsRemaining === 0
-    ) {
-      budget.truncated = true;
-      return null;
-    }
     budget.operationsRemaining -= 1;
+    let cacheable = true;
     return yield* Effect.scoped(
       fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
         Effect.flatMap((file) =>
@@ -758,6 +801,7 @@ export const make = Effect.gen(function* () {
                 budget.recordsRemaining === 0
               ) {
                 budget.truncated = true;
+                cacheable = false;
                 return false;
               }
               recordsRead += 1;
@@ -772,6 +816,7 @@ export const make = Effect.gen(function* () {
             while (bytesRead < maxBytes) {
               if (budget.bytesRemaining === 0 || budget.operationsRemaining === 0) {
                 budget.truncated = true;
+                cacheable = false;
                 return null;
               }
               const readSize = Math.min(
@@ -800,14 +845,77 @@ export const make = Effect.gen(function* () {
 
             if (bytesRead < transcript.size) {
               budget.truncated = true;
+              cacheable = false;
               return null;
             }
             return readLastRecord();
           }),
         ),
       ),
-    ).pipe(Effect.orElseSucceed(() => null));
+    ).pipe(
+      Effect.map((cwd) => ({ cwd, cacheable })),
+      Effect.orElseSucceed(() => ({ cwd: null, cacheable: false })),
+    );
   });
+
+  // The cwd is fixed by the session's first metadata record. ctime plus the
+  // filesystem identity invalidate results after rewrites and replacements.
+  const readCwd = (
+    source: AgentSessionSource,
+    transcript: TranscriptCandidate,
+    budget: MetadataReadBudget,
+  ) => {
+    const cached = transcriptCwdCache.get(transcript.filePath);
+    if (
+      cached !== undefined &&
+      cached.source === source &&
+      cached.mtimeMs === transcript.mtimeMs &&
+      cached.size === transcript.size &&
+      cached.ctimeNs === transcript.ctimeNs &&
+      cached.device === transcript.device &&
+      cached.inode === transcript.inode
+    ) {
+      return Effect.succeed(cached.cwd);
+    }
+    if (transcript.size === 0) {
+      transcriptCwdCache.set(transcript.filePath, {
+        source,
+        mtimeMs: transcript.mtimeMs,
+        size: transcript.size,
+        ctimeNs: transcript.ctimeNs,
+        device: transcript.device,
+        inode: transcript.inode,
+        cwd: null,
+      });
+      return Effect.succeed<string | null>(null);
+    }
+    if (
+      budget.bytesRemaining === 0 ||
+      budget.operationsRemaining < 2 ||
+      budget.recordsRemaining === 0
+    ) {
+      budget.truncated = true;
+      return Effect.succeed<string | null>(null);
+    }
+    return readCwdFromFile(transcript, budget).pipe(
+      Effect.tap(({ cwd, cacheable }) =>
+        cacheable
+          ? Effect.sync(() =>
+              transcriptCwdCache.set(transcript.filePath, {
+                source,
+                mtimeMs: transcript.mtimeMs,
+                size: transcript.size,
+                ctimeNs: transcript.ctimeNs,
+                device: transcript.device,
+                inode: transcript.inode,
+                cwd,
+              }),
+            )
+          : Effect.void,
+      ),
+      Effect.map(({ cwd }) => cwd),
+    );
+  };
 
   /**
    * Project history fields while reading, before allocating whole JSON records.
@@ -953,19 +1061,16 @@ export const make = Effect.gen(function* () {
             break;
           }
           operationsRemaining -= 1;
-          const stats = yield* statOption(filePath);
-          if (
-            Option.isNone(stats) ||
-            stats.value.type !== "File" ||
-            Option.isNone(stats.value.mtime)
-          ) {
-            continue;
-          }
+          const stats = yield* transcriptMetadata.stat(filePath);
+          if (stats === null) continue;
           transcripts.push({
             filePath,
-            mtimeMs: stats.value.mtime.value.getTime(),
+            mtimeMs: stats.mtimeMs,
             providerInstanceId,
-            size: Number(stats.value.size),
+            size: stats.size,
+            ctimeNs: stats.ctimeNs,
+            device: stats.device,
+            inode: stats.inode,
           });
         }
       }
@@ -1018,17 +1123,16 @@ export const make = Effect.gen(function* () {
               }
               const filePath = path.join(directory, entry);
               operationsRemaining -= 1;
-              const stats = yield* statOption(filePath);
-              if (
-                Option.isSome(stats) &&
-                stats.value.type === "File" &&
-                Option.isSome(stats.value.mtime)
-              ) {
+              const stats = yield* transcriptMetadata.stat(filePath);
+              if (stats !== null) {
                 transcripts.push({
                   filePath,
-                  mtimeMs: stats.value.mtime.value.getTime(),
+                  mtimeMs: stats.mtimeMs,
                   providerInstanceId,
-                  size: Number(stats.value.size),
+                  size: stats.size,
+                  ctimeNs: stats.ctimeNs,
+                  device: stats.device,
+                  inode: stats.inode,
                 });
               }
             }
@@ -1055,7 +1159,7 @@ export const make = Effect.gen(function* () {
     >();
 
     for (const transcript of transcripts) {
-      const cwd = yield* readCwd(transcript, budget);
+      const cwd = yield* readCwd(source, transcript, budget);
       if (cwd === null) continue;
       const key = `${transcript.providerInstanceId}\0${cwd}`;
       const existing = byOwnerAndCwd.get(key);
@@ -1172,6 +1276,15 @@ export const make = Effect.gen(function* () {
           : discoverCodexTranscripts(home.homePath, home.providerInstanceId, operationBudget);
         truncated ||= discovered.truncated;
         transcriptCandidates.push(...discovered.transcripts);
+      }
+
+      const discoveredPaths = new Set(
+        transcriptCandidates.map((transcript) => transcript.filePath),
+      );
+      for (const [filePath, cached] of transcriptCwdCache) {
+        if (cached.source === source && !discoveredPaths.has(filePath)) {
+          transcriptCwdCache.delete(filePath);
+        }
       }
 
       transcriptCandidates.sort(
@@ -1492,4 +1605,7 @@ export const make = Effect.gen(function* () {
   return AgentSessionScanner.of({ scan, recentThreads });
 });
 
-export const layer = Layer.effect(AgentSessionScanner, make);
+export const layerWithTranscriptMetadata = (metadataLayer: Layer.Layer<TranscriptFileStat>) =>
+  Layer.effect(AgentSessionScanner, make).pipe(Layer.provide(metadataLayer));
+
+export const layer = layerWithTranscriptMetadata(TranscriptFileStat.layer);
