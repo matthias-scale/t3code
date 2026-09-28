@@ -108,6 +108,16 @@ const runScan = (input: ScannerTestInput) =>
     return yield* scanner.scan;
   }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
+const runScans = (input: ScannerTestInput, count: number) =>
+  Effect.gen(function* () {
+    const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+    const results = [];
+    for (let index = 0; index < count; index += 1) {
+      results.push(yield* scanner.scan);
+    }
+    return results;
+  }).pipe(Effect.provide(makeScannerTestLayer(input)));
+
 const runRecentThreadOutcomes = (input: ScannerTestInput & { readonly workspaceRoot: string }) =>
   Effect.gen(function* () {
     const scanner = yield* AgentSessionScanner.AgentSessionScanner;
@@ -313,6 +323,129 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           expect(result.candidates).toEqual([]);
           expect(transcriptOpenCount).toBe(0);
         }),
+    );
+
+    it.effect("skips transcript reads on an unchanged scan pass", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const transcriptPath = path.join(claudeHomePath, "projects", "-slug", "session.jsonl");
+        yield* writeTranscript({
+          filePath: transcriptPath,
+          contents: claudeSessionLine(workspace),
+          mtimeMs: Date.parse("2026-08-24T12:00:00.000Z"),
+        });
+
+        let transcriptOpenCount = 0;
+        const trackedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          open: (filePath, options) => {
+            if (filePath === transcriptPath) transcriptOpenCount += 1;
+            return fileSystem.open(filePath, options);
+          },
+        });
+        const results = yield* runScans({ claudeHomePath, codexHomePath }, 2).pipe(
+          Effect.provideService(FileSystem.FileSystem, trackedFileSystem),
+        );
+
+        expect(results).toHaveLength(2);
+        expect(results[1]?.candidates.map((candidate) => candidate.path)).toContain(workspace);
+        expect(transcriptOpenCount).toBe(1);
+      }),
+    );
+
+    it.effect("reads changed and new transcripts on the next scan pass", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const firstWorkspace = yield* makeTempDir("t3code-workspace-first-");
+        const changedWorkspace = yield* makeTempDir("t3code-workspace-changed-");
+        const newWorkspace = yield* makeTempDir("t3code-workspace-new-");
+        const changedPath = path.join(claudeHomePath, "projects", "-slug", "changed.jsonl");
+        const newPath = path.join(claudeHomePath, "projects", "-slug", "new.jsonl");
+        const firstMtimeMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* writeTranscript({
+          filePath: changedPath,
+          contents: claudeSessionLine(firstWorkspace),
+          mtimeMs: firstMtimeMs,
+        });
+
+        const transcriptOpenCounts = new Map<string, number>();
+        const trackedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          open: (filePath, options) => {
+            if (filePath === changedPath || filePath === newPath) {
+              transcriptOpenCounts.set(filePath, (transcriptOpenCounts.get(filePath) ?? 0) + 1);
+            }
+            return fileSystem.open(filePath, options);
+          },
+        });
+        const results = yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          yield* scanner.scan;
+          yield* writeTranscript({
+            filePath: changedPath,
+            contents: claudeSessionLine(changedWorkspace),
+            mtimeMs: firstMtimeMs + 1_000,
+          });
+          yield* writeTranscript({
+            filePath: newPath,
+            contents: claudeSessionLine(newWorkspace),
+            mtimeMs: firstMtimeMs + 2_000,
+          });
+          return yield* scanner.scan;
+        }).pipe(
+          Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+          Effect.provideService(FileSystem.FileSystem, trackedFileSystem),
+        );
+
+        expect(results.candidates.map((candidate) => candidate.path)).toEqual(
+          expect.arrayContaining([changedWorkspace, newWorkspace]),
+        );
+        expect(transcriptOpenCounts.get(changedPath)).toBe(2);
+        expect(transcriptOpenCounts.get(newPath)).toBe(1);
+      }),
+    );
+
+    it.effect("evicts deleted transcript cwd cache entries", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const transcriptPath = path.join(claudeHomePath, "projects", "-slug", "session.jsonl");
+        const contents = claudeSessionLine(workspace);
+        const mtimeMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* writeTranscript({ filePath: transcriptPath, contents, mtimeMs });
+
+        let transcriptOpenCount = 0;
+        const trackedFileSystem = FileSystem.FileSystem.of({
+          ...fileSystem,
+          open: (filePath, options) => {
+            if (filePath === transcriptPath) transcriptOpenCount += 1;
+            return fileSystem.open(filePath, options);
+          },
+        });
+        yield* Effect.gen(function* () {
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+          yield* scanner.scan;
+          yield* fileSystem.remove(transcriptPath);
+          yield* scanner.scan;
+          yield* writeTranscript({ filePath: transcriptPath, contents, mtimeMs });
+          yield* scanner.scan;
+        }).pipe(
+          Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })),
+          Effect.provideService(FileSystem.FileSystem, trackedFileSystem),
+        );
+
+        expect(transcriptOpenCount).toBe(2);
+      }),
     );
 
     it.effect.each(["claudeAgent", "codex"] as const)(
