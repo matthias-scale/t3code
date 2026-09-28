@@ -14,6 +14,8 @@
  * @module project/AgentSessionScanner
  */
 import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Effect File.Info omits ctime; this replaces the discovery stat with a high-resolution one.
+import * as NodeFSP from "node:fs/promises";
 
 import {
   AgentSessionScanError,
@@ -198,6 +200,40 @@ export class AgentSessionScanner extends Context.Service<
 
 type AgentSessionSource = AgentSessionProjectCandidate["sources"][number];
 
+export interface TranscriptFileMetadata {
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
+}
+
+/** Native stat fields absent from Effect's portable File.Info shape. */
+export class TranscriptFileStat extends Context.Service<
+  TranscriptFileStat,
+  {
+    readonly stat: (filePath: string) => Effect.Effect<TranscriptFileMetadata | null>;
+  }
+>()("t3/project/AgentSessionScanner/TranscriptFileStat") {
+  static readonly layer = Layer.succeed(TranscriptFileStat, {
+    stat: (filePath) =>
+      Effect.tryPromise(() => NodeFSP.stat(filePath, { bigint: true })).pipe(
+        Effect.map((stats) =>
+          stats.isFile()
+            ? {
+                size: Number(stats.size),
+                mtimeMs: Number(stats.mtimeMs),
+                ctimeNs: stats.ctimeNs,
+                device: stats.dev,
+                inode: stats.ino,
+              }
+            : null,
+        ),
+        Effect.orElseSucceed(() => null),
+      ),
+  });
+}
+
 /** A single directory's worth of evidence from one source. */
 interface RawCandidate {
   readonly cwd: string;
@@ -216,12 +252,18 @@ interface TranscriptCandidate {
   readonly mtimeMs: number;
   readonly providerInstanceId: ProviderInstanceId;
   readonly size: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
 }
 
 interface CachedTranscriptCwd {
   readonly source: AgentSessionSource;
   readonly mtimeMs: number;
   readonly size: number;
+  readonly ctimeNs: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
   readonly cwd: string | null;
 }
 
@@ -625,6 +667,7 @@ function sameTranscriptIdentity(
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  const transcriptMetadata = yield* TranscriptFileStat;
   const transcriptCwdCache = new Map<string, CachedTranscriptCwd>();
   // Different project imports can arrive concurrently from multiple clients.
   // Only one transcript may hold its selected-history budget at a time.
@@ -815,8 +858,8 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  // The cwd is fixed by the session's first metadata record. File size and
-  // mtime invalidate both positive and negative results when a transcript changes.
+  // The cwd is fixed by the session's first metadata record. ctime plus the
+  // filesystem identity invalidate results after rewrites and replacements.
   const readCwd = (
     source: AgentSessionSource,
     transcript: TranscriptCandidate,
@@ -827,7 +870,10 @@ export const make = Effect.gen(function* () {
       cached !== undefined &&
       cached.source === source &&
       cached.mtimeMs === transcript.mtimeMs &&
-      cached.size === transcript.size
+      cached.size === transcript.size &&
+      cached.ctimeNs === transcript.ctimeNs &&
+      cached.device === transcript.device &&
+      cached.inode === transcript.inode
     ) {
       return Effect.succeed(cached.cwd);
     }
@@ -836,6 +882,9 @@ export const make = Effect.gen(function* () {
         source,
         mtimeMs: transcript.mtimeMs,
         size: transcript.size,
+        ctimeNs: transcript.ctimeNs,
+        device: transcript.device,
+        inode: transcript.inode,
         cwd: null,
       });
       return Effect.succeed<string | null>(null);
@@ -856,6 +905,9 @@ export const make = Effect.gen(function* () {
                 source,
                 mtimeMs: transcript.mtimeMs,
                 size: transcript.size,
+                ctimeNs: transcript.ctimeNs,
+                device: transcript.device,
+                inode: transcript.inode,
                 cwd,
               }),
             )
@@ -1009,19 +1061,16 @@ export const make = Effect.gen(function* () {
             break;
           }
           operationsRemaining -= 1;
-          const stats = yield* statOption(filePath);
-          if (
-            Option.isNone(stats) ||
-            stats.value.type !== "File" ||
-            Option.isNone(stats.value.mtime)
-          ) {
-            continue;
-          }
+          const stats = yield* transcriptMetadata.stat(filePath);
+          if (stats === null) continue;
           transcripts.push({
             filePath,
-            mtimeMs: stats.value.mtime.value.getTime(),
+            mtimeMs: stats.mtimeMs,
             providerInstanceId,
-            size: Number(stats.value.size),
+            size: stats.size,
+            ctimeNs: stats.ctimeNs,
+            device: stats.device,
+            inode: stats.inode,
           });
         }
       }
@@ -1074,17 +1123,16 @@ export const make = Effect.gen(function* () {
               }
               const filePath = path.join(directory, entry);
               operationsRemaining -= 1;
-              const stats = yield* statOption(filePath);
-              if (
-                Option.isSome(stats) &&
-                stats.value.type === "File" &&
-                Option.isSome(stats.value.mtime)
-              ) {
+              const stats = yield* transcriptMetadata.stat(filePath);
+              if (stats !== null) {
                 transcripts.push({
                   filePath,
-                  mtimeMs: stats.value.mtime.value.getTime(),
+                  mtimeMs: stats.mtimeMs,
                   providerInstanceId,
-                  size: Number(stats.value.size),
+                  size: stats.size,
+                  ctimeNs: stats.ctimeNs,
+                  device: stats.device,
+                  inode: stats.inode,
                 });
               }
             }
@@ -1557,4 +1605,7 @@ export const make = Effect.gen(function* () {
   return AgentSessionScanner.of({ scan, recentThreads });
 });
 
-export const layer = Layer.effect(AgentSessionScanner, make);
+export const layerWithTranscriptMetadata = (metadataLayer: Layer.Layer<TranscriptFileStat>) =>
+  Layer.effect(AgentSessionScanner, make).pipe(Layer.provide(metadataLayer));
+
+export const layer = layerWithTranscriptMetadata(TranscriptFileStat.layer);
