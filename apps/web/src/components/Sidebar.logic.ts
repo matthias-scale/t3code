@@ -6,7 +6,13 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type {
+  AgentInboxItem,
+  AgentInboxStatus,
+  ContextMenuItem,
+  EnvironmentId,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import type { AsyncResult } from "effect/unstable/reactivity";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
@@ -1246,4 +1252,72 @@ export function sortScopedProjectsForSidebar<
       left.environmentId.localeCompare(right.environmentId) ||
       left.id.localeCompare(right.id),
   );
+}
+
+// ── Agent inbox ─────────────────────────────────────────────────────
+
+export interface AgentInboxView {
+  /** Unseen first, then seen; newest first within each group. */
+  readonly unseen: ReadonlyArray<AgentInboxItem>;
+  readonly seen: ReadonlyArray<AgentInboxItem>;
+  readonly unseenCount: number;
+}
+
+const agentInboxTime = (item: AgentInboxItem) => {
+  const time = item.createdAt === null ? Number.NaN : Date.parse(item.createdAt);
+  return Number.isNaN(time) ? 0 : time;
+};
+
+/**
+ * Null hides the section: the query has not answered yet, or the server reports agent-inbox
+ * missing or unreachable. `locallySeen` holds ids opened here before the next poll confirms them,
+ * so the badge clears per item on click rather than up to one poll later.
+ */
+export function buildAgentInboxView(
+  status: AgentInboxStatus | null,
+  locallySeen: ReadonlySet<string>,
+): AgentInboxView | null {
+  if (status === null || !status.available) return null;
+  const sorted = status.items.toSorted((a, b) => agentInboxTime(b) - agentInboxTime(a));
+  const unseen: AgentInboxItem[] = [];
+  const seen: AgentInboxItem[] = [];
+  for (const item of sorted) {
+    (item.seen || locallySeen.has(item.id) ? seen : unseen).push(item);
+  }
+  return { unseen, seen, unseenCount: unseen.length };
+}
+
+/** Thread ids the inbox owns; the projects list leaves them to the Inbox section. */
+export function agentInboxThreadIds(status: AgentInboxStatus | null): ReadonlySet<string> {
+  if (status === null || !status.available) return new Set();
+  return new Set(status.items.flatMap((item) => (item.t3ThreadId ? [item.t3ThreadId] : [])));
+}
+
+/** Only the environment that answered the inbox query owns those thread ids. */
+export function excludeAgentInboxThreads<
+  T extends { readonly id: ThreadId; readonly environmentId: EnvironmentId },
+>(
+  threads: ReadonlyArray<T>,
+  inboxEnvironmentId: EnvironmentId | null,
+  inboxThreadIds: ReadonlySet<string>,
+): ReadonlyArray<T> {
+  if (inboxEnvironmentId === null || inboxThreadIds.size === 0) return threads;
+  return threads.filter(
+    (thread) => thread.environmentId !== inboxEnvironmentId || !inboxThreadIds.has(thread.id),
+  );
+}
+
+export type AgentInboxItemTarget =
+  | { readonly kind: "thread"; readonly threadId: ThreadId }
+  | { readonly kind: "summary" };
+
+/** Opens the thread when this host has it; otherwise the row shows its summary and "Open here". */
+export function resolveAgentInboxItemTarget(
+  item: AgentInboxItem,
+  localThreadIds: ReadonlySet<string>,
+): AgentInboxItemTarget {
+  if (item.t3ThreadId !== null && localThreadIds.has(item.t3ThreadId)) {
+    return { kind: "thread", threadId: item.t3ThreadId as ThreadId };
+  }
+  return { kind: "summary" };
 }

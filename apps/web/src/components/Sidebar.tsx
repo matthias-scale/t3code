@@ -141,6 +141,8 @@ import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../s
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
+import { agentInboxStatus } from "../state/agentInbox";
+import { SidebarAgentInbox } from "./sidebar/SidebarAgentInbox";
 import { useThreadSearch } from "../state/queries";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -192,6 +194,8 @@ import {
   type SidebarListItem,
   type SidebarListMarker,
   type SidebarSection,
+  agentInboxThreadIds,
+  excludeAgentInboxThreads,
 } from "./Sidebar.logic";
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import {
@@ -2175,7 +2179,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useThreadShells();
+  const allThreads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -2263,6 +2267,34 @@ export default function Sidebar() {
   );
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const agentInbox = useEnvironmentQuery(
+    primaryEnvironmentId === null
+      ? null
+      : agentInboxStatus({ environmentId: primaryEnvironmentId, input: {} }),
+  );
+  // A refresh briefly clears the value; keep the last answer so the section does not flicker.
+  const [lastAgentInboxStatus, setLastAgentInboxStatus] = useState(agentInbox.data);
+  if (agentInbox.data !== null && agentInbox.data !== lastAgentInboxStatus) {
+    setLastAgentInboxStatus(agentInbox.data);
+  }
+  const agentInboxStatusValue = agentInbox.data ?? lastAgentInboxStatus;
+  const agentInboxOwnedThreadIds = useMemo(
+    () => agentInboxThreadIds(agentInboxStatusValue),
+    [agentInboxStatusValue],
+  );
+  const threads = useMemo(
+    () => excludeAgentInboxThreads(allThreads, primaryEnvironmentId, agentInboxOwnedThreadIds),
+    [agentInboxOwnedThreadIds, allThreads, primaryEnvironmentId],
+  );
+  const primaryLocalThreadIds = useMemo(
+    () =>
+      new Set<string>(
+        allThreads
+          .filter((thread) => thread.environmentId === primaryEnvironmentId)
+          .map((thread) => thread.id),
+      ),
+    [allThreads, primaryEnvironmentId],
+  );
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
@@ -4603,6 +4635,17 @@ export default function Sidebar() {
         }
       >
         <SidebarGroup className="flex-1" role="presentation">
+          {!isSearchingThreads && primaryEnvironmentId !== null ? (
+            <SidebarAgentInbox
+              environmentId={primaryEnvironmentId}
+              status={agentInboxStatusValue}
+              localThreadIds={primaryLocalThreadIds}
+              onOpenThread={(threadId) =>
+                void navigateToThread(scopeThreadRef(primaryEnvironmentId, threadId))
+              }
+              onPulled={agentInbox.refresh}
+            />
+          ) : null}
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
               <TooltipProvider

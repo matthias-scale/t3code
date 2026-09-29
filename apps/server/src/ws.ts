@@ -144,6 +144,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import * as AgentInbox from "./agentInbox/AgentInbox.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -628,6 +629,7 @@ const makeWsRpcLayer = (
         | WorkspacePaths.WorkspacePaths
       >();
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
+      const agentInbox = yield* AgentInbox.AgentInbox;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -3158,6 +3160,18 @@ const makeWsRpcLayer = (
             deletePendingAttachment(input.attachmentId),
             { "rpc.aggregate": "workspace" },
           ),
+        [WS_METHODS.agentInboxStatus]: () =>
+          observeRpcEffect(WS_METHODS.agentInboxStatus, agentInbox.status, {
+            "rpc.aggregate": "workspace",
+          }),
+        [WS_METHODS.agentInboxMarkSeen]: (input) =>
+          observeRpcEffect(WS_METHODS.agentInboxMarkSeen, agentInbox.markSeen(input.id), {
+            "rpc.aggregate": "workspace",
+          }),
+        [WS_METHODS.agentInboxPull]: (input) =>
+          observeRpcEffect(WS_METHODS.agentInboxPull, agentInbox.pull(input.id), {
+            "rpc.aggregate": "workspace",
+          }),
         [WS_METHODS.agentSessionsScan]: () =>
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",
@@ -3859,6 +3873,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),
+              Layer.provide(AgentInbox.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               // One server-lifetime service means clients share the same PR caches, and a WS

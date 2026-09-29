@@ -40,6 +40,12 @@ import {
   AgentSessionScanError,
 } from "./agentSessions.ts";
 import {
+  AgentInboxCommandError,
+  AgentInboxItemInput,
+  AgentInboxStatus,
+  AgentInboxStatusInput,
+} from "./agentInbox.ts";
+import {
   AssetAccessError,
   AssetCreateUrlInput,
   AssetCreateUrlResult,
@@ -292,6 +298,9 @@ export const WS_METHODS = {
   filesystemBrowse: "filesystem.browse",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
+  agentInboxStatus: "agentInbox.status",
+  agentInboxMarkSeen: "agentInbox.markSeen",
+  agentInboxPull: "agentInbox.pull",
   assetsCreateUrl: "assets.createUrl",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -983,6 +992,22 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   ]),
 });
 
+const WsAgentInboxStatusRpc = Rpc.make(WS_METHODS.agentInboxStatus, {
+  payload: AgentInboxStatusInput,
+  success: AgentInboxStatus,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsAgentInboxMarkSeenRpc = Rpc.make(WS_METHODS.agentInboxMarkSeen, {
+  payload: AgentInboxItemInput,
+  error: Schema.Union([AgentInboxCommandError, EnvironmentAuthorizationError]),
+});
+
+const WsAgentInboxPullRpc = Rpc.make(WS_METHODS.agentInboxPull, {
+  payload: AgentInboxItemInput,
+  error: Schema.Union([AgentInboxCommandError, EnvironmentAuthorizationError]),
+});
+
 const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
@@ -1473,6 +1498,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsFilesystemBrowseRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
+  WsAgentInboxStatusRpc,
+  WsAgentInboxMarkSeenRpc,
+  WsAgentInboxPullRpc,
   WsAssetsCreateUrlRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
