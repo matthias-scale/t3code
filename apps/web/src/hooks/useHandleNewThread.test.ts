@@ -10,6 +10,8 @@ const testState = vi.hoisted(() => {
     newWorktreesStartFromOrigin: false,
     defaultModelSelection: null,
     defaultRuntimeMode: "full-access" as RuntimeMode,
+    providerInstances: {} as Record<string, unknown>,
+    projectSettingsOverrides: {} as Record<string, unknown>,
   };
   let storedDraft: {
     readonly draftId: string;
@@ -17,6 +19,7 @@ const testState = vi.hoisted(() => {
     readonly promotedTo: null;
     readonly threadId: string;
   } | null = null;
+  let providersByEnvironment: ReadonlyMap<string, ReadonlyArray<unknown>> = new Map();
   const router = {
     state: {
       location: { href: "/" },
@@ -46,6 +49,12 @@ const testState = vi.hoisted(() => {
     get projectRemoved() {
       return projectRemoved;
     },
+    get providersByEnvironment() {
+      return providersByEnvironment;
+    },
+    setProviders(entries: ReadonlyArray<readonly [string, ReadonlyArray<unknown>]>) {
+      providersByEnvironment = new Map(entries);
+    },
     removeProject() {
       projectRemoved = true;
     },
@@ -61,16 +70,20 @@ const testState = vi.hoisted(() => {
     ) {
       storedDraft = nextStoredDraft;
       projectRemoved = false;
+      providersByEnvironment = new Map();
       targetSettings = {
         defaultThreadEnvMode: workspaceDefaults.envMode,
         newWorktreesStartFromOrigin: workspaceDefaults.startFromOrigin,
         defaultModelSelection: null,
         defaultRuntimeMode: "full-access",
+        providerInstances: {},
+        projectSettingsOverrides: {},
       };
       router.state.location.href = "/";
       router.navigate.mockClear();
       draftStore.setDraftThreadContext.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
+      draftStore.setModelSelection.mockClear();
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -93,7 +106,13 @@ vi.mock("@effect/atom-react", () => ({
               },
             },
           ],
-          ["environment-ssh", { settings: testState.targetSettings }],
+          [
+            "environment-ssh",
+            {
+              settings: testState.targetSettings,
+              providers: testState.providersByEnvironment.get("environment-ssh") ?? [],
+            },
+          ],
         ]),
 }));
 vi.mock("@t3tools/client-runtime/environment", () => ({
@@ -103,7 +122,27 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
 }));
 vi.mock("@t3tools/contracts", () => ({
   DEFAULT_RUNTIME_MODE: "default",
-  DEFAULT_SERVER_SETTINGS: {},
+  DEFAULT_SERVER_SETTINGS: { providerInstances: {}, projectSettingsOverrides: {} },
+  ProviderInstanceId: { make: (value: string) => value },
+  defaultInstanceIdForDriver: (driver: string) => driver,
+  DEFAULT_MODEL_BY_PROVIDER: {},
+  PROVIDER_DISPLAY_NAMES: {},
+  resolveProjectProviderInstanceEnabled: (
+    settings: {
+      providerInstances?: Record<string, { enabled?: boolean }>;
+      projectSettingsOverrides?: Record<
+        string,
+        { providerInstances?: Record<string, { enabled?: boolean }> }
+      >;
+    },
+    projectId: string | null,
+    instanceId: string,
+  ) =>
+    (projectId === null
+      ? undefined
+      : settings.projectSettingsOverrides?.[projectId]?.providerInstances?.[instanceId]?.enabled) ??
+    settings.providerInstances?.[instanceId]?.enabled ??
+    true,
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
   resolveProjectSettings: (
@@ -312,4 +351,102 @@ describe.each([
       );
     },
   );
+});
+
+describe("useNewThreadHandler picker-carried model selection", () => {
+  const projectRef = {
+    environmentId: "environment-ssh",
+    projectId: "project-remote",
+  } as never;
+  const pickerSelection = { instanceId: "codex", model: "gpt-5.4-codex" } as never;
+  const selectableCodexProvider = {
+    instanceId: "codex",
+    driver: "codex",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    availability: "available",
+    models: [],
+  };
+
+  it.each([
+    ["new", null],
+    [
+      "reused",
+      {
+        draftId: "draft-existing",
+        environmentId: "environment-ssh",
+        promotedTo: null,
+        threadId: "thread-existing",
+      },
+    ],
+  ] as const)(
+    "applies the picker's explicit provider selection to the %s destination draft",
+    async (_, draft) => {
+      testState.reset(draft);
+      testState.setProviders([["environment-ssh", [selectableCodexProvider]]]);
+      const openThread = useNewThreadHandler();
+
+      const pendingOpen = openThread(projectRef, { modelSelection: pickerSelection });
+      testState.completeProjectFileRead(null);
+      const opened = await pendingOpen;
+
+      expect(opened).not.toBeNull();
+      expect(testState.draftStore.setModelSelection).toHaveBeenCalledWith(
+        opened!.draftId,
+        pickerSelection,
+        { explicit: true, replaceOptions: true },
+      );
+    },
+  );
+
+  it("falls back to ordinary resolution when the destination machine lacks the provider", async () => {
+    testState.reset(null);
+    testState.setProviders([["environment-ssh", []]]);
+    const openThread = useNewThreadHandler();
+
+    const pendingOpen = openThread(projectRef, { modelSelection: pickerSelection });
+    testState.completeProjectFileRead(null);
+    const opened = await pendingOpen;
+
+    expect(opened).not.toBeNull();
+    expect(testState.draftStore.setModelSelection).not.toHaveBeenCalledWith(
+      "draft-delayed",
+      pickerSelection,
+      expect.anything(),
+    );
+  });
+
+  it("falls back to ordinary resolution when project settings disable the provider", async () => {
+    testState.reset(null);
+    testState.setProviders([["environment-ssh", [selectableCodexProvider]]]);
+    testState.targetSettings.projectSettingsOverrides = {
+      "project-remote": { providerInstances: { codex: { enabled: false } } },
+    } as never;
+    const openThread = useNewThreadHandler();
+
+    const pendingOpen = openThread(projectRef, { modelSelection: pickerSelection });
+    testState.completeProjectFileRead(null);
+    const opened = await pendingOpen;
+
+    expect(opened).not.toBeNull();
+    expect(testState.draftStore.setModelSelection).not.toHaveBeenCalledWith(
+      "draft-delayed",
+      pickerSelection,
+      expect.anything(),
+    );
+  });
+
+  it("leaves ordinary new-thread resolution untouched without a picker selection", async () => {
+    testState.reset(null);
+    testState.setProviders([["environment-ssh", [selectableCodexProvider]]]);
+    const openThread = useNewThreadHandler();
+
+    const pendingOpen = openThread(projectRef);
+    testState.completeProjectFileRead(null);
+    const opened = await pendingOpen;
+
+    expect(opened).not.toBeNull();
+    expect(testState.draftStore.setModelSelection).not.toHaveBeenCalled();
+  });
 });
