@@ -4,7 +4,12 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { DEFAULT_SERVER_SETTINGS, type ScopedProjectRef, type ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type ModelSelection,
+  type ScopedProjectRef,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
 import {
@@ -37,6 +42,11 @@ import {
   resolveNewThreadModelSelectionOverride,
 } from "../lib/chatThreadActions";
 import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
+import {
+  applyProviderInstanceSettings,
+  deriveProviderInstanceEntries,
+  resolveSelectableProviderInstanceEntry,
+} from "../providerInstances";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
@@ -76,6 +86,13 @@ export function useNewThreadHandler() {
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
         replace?: boolean;
+        /**
+         * Explicit provider pick a project picker carries from the draft the user
+         * is looking at. Wins over the project default and sticky state so picking
+         * a project does not silently reset it; ignored when the destination
+         * machine does not offer that provider instance.
+         */
+        modelSelection?: ModelSelection;
       },
     ): Promise<{ draftId: DraftId; threadId: ThreadId } | null> => {
       const projects = readProjects();
@@ -140,6 +157,23 @@ export function useNewThreadHandler() {
             currentRouteTarget?.kind === "draft" ? currentRouteTarget.draftId : null,
           destinationDraftId,
         });
+      // A picker-carried selection applies only when the destination machine's
+      // catalog still offers that exact instance; otherwise the ordinary
+      // project-default/carry resolution decides.
+      const pickerModelSelection = (() => {
+        const requested = options?.modelSelection ?? null;
+        if (requested === null) return null;
+        const providers = environmentServerConfigs.get(projectRef.environmentId)?.providers ?? [];
+        const entries = applyProviderInstanceSettings(
+          deriveProviderInstanceEntries(providers),
+          targetServerSettings,
+          project?.id ?? null,
+        );
+        return resolveSelectableProviderInstanceEntry(entries, requested.instanceId)?.instanceId ===
+          requested.instanceId
+          ? requested
+          : null;
+      })();
       const resolveDefaultEnvMode = async (): Promise<DraftThreadEnvMode> => {
         const consultProjectFile =
           project !== undefined && projectSettings.settings.defaultThreadEnvMode === null;
@@ -252,7 +286,13 @@ export function useNewThreadHandler() {
           }
           const storedDraft = getComposerDraft(emptyStoredDraftThread.draftId);
           const storedDraftHasExplicitModelPick = hasExplicitComposerModelSelection(storedDraft);
-          if (!storedDraftHasExplicitModelPick) {
+          if (pickerModelSelection !== null) {
+            applyStickyState(emptyStoredDraftThread.draftId);
+            setModelSelection(emptyStoredDraftThread.draftId, pickerModelSelection, {
+              explicit: true,
+              replaceOptions: true,
+            });
+          } else if (!storedDraftHasExplicitModelPick) {
             applyStickyState(emptyStoredDraftThread.draftId);
             const modelSelectionOverride = resolveModelSelectionOverride(
               emptyStoredDraftThread.draftId,
@@ -374,9 +414,13 @@ export function useNewThreadHandler() {
           ...(carryInteractionMode ? { interactionMode: carryInteractionMode } : {}),
         });
         applyStickyState(draftId);
-        const modelSelectionOverride = resolveModelSelectionOverride(draftId);
+        const modelSelectionOverride =
+          pickerModelSelection ?? resolveModelSelectionOverride(draftId);
         if (modelSelectionOverride) {
-          setModelSelection(draftId, modelSelectionOverride, { replaceOptions: true });
+          setModelSelection(draftId, modelSelectionOverride, {
+            replaceOptions: true,
+            ...(pickerModelSelection !== null ? { explicit: true } : {}),
+          });
         }
         await router.navigate({
           to: "/draft/$draftId",

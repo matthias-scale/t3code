@@ -1907,6 +1907,42 @@ describe("composerDraftStore project draft thread mapping", () => {
       startFromOrigin: true,
     });
   });
+
+  it("moves the logical mapping on an auto scratch retarget and keeps the explicit model selection", () => {
+    const store = useComposerDraftStore.getState();
+    const scratchProjectRef = scopeProjectRef(OTHER_TEST_ENVIRONMENT_ID, otherProjectId);
+    // Each environment's scratch project is its own logical project.
+    const remoteScratchLogicalKey = scopedProjectKey(scratchProjectRef);
+    store.setProjectDraftThreadId(projectRef, draftId, { threadId });
+    store.setModelSelection(
+      draftId,
+      modelSelection(CODEX_DRIVER, "gpt-5.4", { reasoningEffort: "xhigh" }),
+      { explicit: true },
+    );
+
+    store.setLogicalProjectDraftThreadId(remoteScratchLogicalKey, scratchProjectRef, draftId, {
+      threadId,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+    });
+
+    expect(store.getDraftThread(draftId)).toMatchObject({
+      environmentId: OTHER_TEST_ENVIRONMENT_ID,
+      projectId: otherProjectId,
+      logicalProjectKey: remoteScratchLogicalKey,
+      environmentSelection: "auto",
+      loadBalancedEnvironmentId: OTHER_TEST_ENVIRONMENT_ID,
+    });
+    expect(store.getDraftSessionByLogicalProjectKey(remoteScratchLogicalKey)?.draftId).toBe(
+      draftId,
+    );
+    expect(store.getDraftSessionByLogicalProjectKey(scopedProjectKey(projectRef))).toBeNull();
+    const draft = store.getComposerDraft(draftId);
+    expect(draft?.modelSelectionExplicit).toBe(true);
+    expect(draft?.modelSelectionByProvider[CODEX_INSTANCE]).toEqual(
+      modelSelection(CODEX_DRIVER, "gpt-5.4", { reasoningEffort: "xhigh" }),
+    );
+  });
 });
 
 describe("composerDraftStore modelSelection", () => {
