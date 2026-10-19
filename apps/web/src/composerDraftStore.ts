@@ -905,10 +905,14 @@ function coerceProviderOptionSelections(
       const optionValue = record.value;
       if (typeof id !== "string" || id.length === 0) continue;
       if (typeof optionValue === "string" || typeof optionValue === "boolean") {
-        out.push({ id, value: optionValue });
+        out.push({
+          id,
+          value: optionValue,
+          ...(record.required === true ? { required: true } : {}),
+        });
       }
     }
-    return out.length > 0 ? out : undefined;
+    return out;
   }
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
@@ -3045,12 +3049,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return;
           }
           const instanceKey = options?.instanceId ?? defaultInstanceIdForDriver(normalizedProvider);
+          const displayedModel = normalizeModelSlug(options?.model, normalizedProvider);
           const fallbackModel =
-            normalizeModelSlug(options?.model, normalizedProvider) ??
-            DEFAULT_MODEL_BY_PROVIDER[normalizedProvider] ??
-            DEFAULT_MODEL;
-          const providerOpts =
-            nextProviderOptions && nextProviderOptions.length > 0 ? nextProviderOptions : undefined;
+            displayedModel ?? DEFAULT_MODEL_BY_PROVIDER[normalizedProvider] ?? DEFAULT_MODEL;
+          const providerOpts = nextProviderOptions ?? undefined;
 
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey];
@@ -3061,12 +3063,14 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (providerOpts) {
               nextMap[instanceKey] = createModelSelection(
                 instanceKey,
-                currentForProvider?.model ?? fallbackModel,
+                displayedModel ?? currentForProvider?.model ?? fallbackModel,
                 providerOpts,
               );
-            } else if (currentForProvider && (currentForProvider.options?.length ?? 0) > 0) {
-              const { options: _, ...rest } = currentForProvider;
-              nextMap[instanceKey] = rest as ModelSelection;
+            } else if (displayedModel || (currentForProvider?.options?.length ?? 0) > 0) {
+              nextMap[instanceKey] = createModelSelection(
+                instanceKey,
+                displayedModel ?? currentForProvider?.model ?? fallbackModel,
+              );
             }
 
             let nextStickyMap = state.stickyModelSelectionByProvider;
@@ -3078,12 +3082,11 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                 nextStickyMap[instanceKey] ??
                 base.modelSelectionByProvider[instanceKey] ??
                 createModelSelection(instanceKey, fallbackModel);
-              const rememberedModel =
-                normalizeModelSlug(options?.model, normalizedProvider) ?? stickyBase.model;
+              const rememberedModel = displayedModel ?? stickyBase.model;
               if (providerOpts) {
                 nextStickyMap[instanceKey] = createModelSelection(
                   instanceKey,
-                  stickyBase.model,
+                  rememberedModel,
                   providerOpts,
                 );
                 nextOptionsByModel = {
@@ -3093,9 +3096,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     [rememberedModel]: providerOpts,
                   },
                 };
-              } else if ((stickyBase.options?.length ?? 0) > 0) {
-                const { options: _, ...rest } = stickyBase;
-                nextStickyMap[instanceKey] = rest as ModelSelection;
+              } else if (displayedModel || (stickyBase.options?.length ?? 0) > 0) {
+                nextStickyMap[instanceKey] = createModelSelection(instanceKey, rememberedModel);
                 const rememberedByModel = {
                   ...state.stickyOptionsByModelByProvider[instanceKey],
                 };
