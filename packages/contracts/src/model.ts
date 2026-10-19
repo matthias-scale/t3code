@@ -49,6 +49,8 @@ export type ProviderOptionSelectionValue = typeof ProviderOptionSelectionValue.T
 export const ProviderOptionSelection = Schema.Struct({
   id: TrimmedNonEmptyString,
   value: ProviderOptionSelectionValue,
+  // Required persisted defaults must be acknowledged by the live provider.
+  required: Schema.optionalKey(Schema.Boolean),
 });
 export type ProviderOptionSelection = typeof ProviderOptionSelection.Type;
 

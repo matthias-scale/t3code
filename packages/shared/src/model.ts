@@ -1,5 +1,9 @@
 import {
   type CustomModelSetting,
+  type ProviderDefaultedFields,
+  type ProviderNewSessionDefaults,
+  type RuntimeMode,
+  type ProviderInteractionMode,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelCapabilities,
   type ModelSelection,
@@ -84,17 +88,18 @@ export function getModelSelectionBooleanOptionValue(
 
 function canonicalModelSelectionOptions(
   modelSelection: ModelSelection,
-): ReadonlyArray<readonly [id: string, value: string | boolean]> {
+): ReadonlyArray<readonly [id: string, value: string | boolean, required: boolean]> {
   return copySorted(
     (modelSelection.options ?? []).map(
-      (selection): readonly [id: string, value: string | boolean] => [
+      (selection): readonly [id: string, value: string | boolean, required: boolean] => [
         selection.id,
         selection.value,
+        selection.required === true,
       ],
     ),
     (
-      [leftId, leftValue]: readonly [id: string, value: string | boolean],
-      [rightId, rightValue]: readonly [id: string, value: string | boolean],
+      [leftId, leftValue]: readonly [id: string, value: string | boolean, required: boolean],
+      [rightId, rightValue]: readonly [id: string, value: string | boolean, required: boolean],
     ) => {
       const idOrder = leftId.localeCompare(rightId);
       return idOrder !== 0 ? idOrder : String(leftValue).localeCompare(String(rightValue));
@@ -111,7 +116,10 @@ export function modelSelectionsEqual(left: ModelSelection, right: ModelSelection
   return (
     leftOptions.length === rightOptions.length &&
     leftOptions.every(
-      ([id, value], index) => id === rightOptions[index]?.[0] && value === rightOptions[index]?.[1],
+      ([id, value, required], index) =>
+        id === rightOptions[index]?.[0] &&
+        value === rightOptions[index]?.[1] &&
+        required === rightOptions[index]?.[2],
     )
   );
 }
@@ -291,7 +299,16 @@ export function buildExplicitProviderOptionSelectionsFromDescriptors(
   const normalized = buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
     (selection) => explicitIds.has(selection.id),
   );
-  return normalized && normalized.length > 0 ? normalized : undefined;
+  // A missing descriptor must not silently erase a required default: the live
+  // session is authoritative and must reject it visibly if it cannot apply it.
+  const required = selections.filter((selection) => selection.required);
+  const result = [
+    ...(normalized ?? []).filter(
+      (selection) => !required.some((candidate) => candidate.id === selection.id),
+    ),
+    ...required,
+  ];
+  return result.length > 0 ? result : undefined;
 }
 
 export function isClaudeUltrathinkPrompt(text: string | null | undefined): boolean {
@@ -462,7 +479,7 @@ export function createModelSelection(
     instanceId,
     model,
   };
-  return selections.length > 0 ? { ...base, options: selections } : base;
+  return options ? { ...base, options: selections } : base;
 }
 
 export function resolvePromptInjectedEffort(
@@ -499,4 +516,50 @@ export function applyClaudePromptEffortPrefix(
     return trimmed;
   }
   return `Ultrathink:\n${trimmed}`;
+}
+
+/** Resolve only fields identified as fallbacks, never saved/explicit selections.
+ * Persist the result, not this mask: later settings edits must not change a thread.
+ */
+export function resolveProviderNewSessionDefaults<
+  T extends {
+    readonly modelSelection: ModelSelection;
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+  },
+>(
+  defaults: ProviderNewSessionDefaults | undefined,
+  input: T,
+  defaultedFields: ProviderDefaultedFields = [],
+): T {
+  if (!defaults || defaultedFields.length === 0) return input;
+  const model = defaultedFields.includes("model") ? defaults.model : input.modelSelection.model;
+  const options =
+    model === defaults.model &&
+    defaultedFields.includes("options") &&
+    input.modelSelection.options?.length !== 0
+      ? [
+          ...(defaults.options ?? [])
+            .filter(
+              (option) =>
+                !input.modelSelection.options?.some((explicit) => explicit.id === option.id),
+            )
+            .map((option) => ({ ...option, required: true })),
+          ...(input.modelSelection.options ?? []),
+        ]
+      : input.modelSelection.options;
+  return {
+    ...input,
+    modelSelection: {
+      ...input.modelSelection,
+      model,
+      ...(options === undefined || options.length === 0 ? {} : { options }),
+    },
+    runtimeMode: defaultedFields.includes("runtimeMode")
+      ? (defaults.runtimeMode ?? input.runtimeMode)
+      : input.runtimeMode,
+    interactionMode: defaultedFields.includes("interactionMode")
+      ? (defaults.interactionMode ?? input.interactionMode)
+      : input.interactionMode,
+  };
 }

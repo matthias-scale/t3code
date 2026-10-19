@@ -34,6 +34,7 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerSettingsModule from "./serverSettings.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
+const encodeSettings = Schema.encodeEffect(ServerSettings);
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
@@ -98,6 +99,35 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists versioned provider defaults through settings updates and reads", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const instanceId = ProviderInstanceId.make("copilot_pool");
+      const newSessionDefaults = {
+        version: 1 as const,
+        model: "gpt-4.1",
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        options: [{ id: "allow_all", value: "on" }],
+      };
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId,
+        instance: { driver: ProviderDriverKind.make("acpRegistry"), newSessionDefaults },
+      });
+      yield* service.updateSettings({ defaultRuntimeMode: "approval-required" });
+      assert.deepEqual(
+        (yield* service.getSettings).providerInstances[instanceId]?.newSessionDefaults,
+        newSessionDefaults,
+      );
+      const encoded = yield* encodeSettings(yield* service.getSettings);
+      assert.deepEqual(
+        (yield* decodeServerSettings(encoded)).providerInstances[instanceId]?.newSessionDefaults,
+        newSessionDefaults,
+      );
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;

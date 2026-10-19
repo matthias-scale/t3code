@@ -1,3 +1,5 @@
+import { resolveProviderNewSessionDefaults } from "@t3tools/shared/model";
+import type { ProviderDefaultedFields } from "@t3tools/contracts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -75,6 +77,7 @@ export interface ThreadLaunchInitialMessage {
 }
 
 export interface ThreadLaunchInput {
+  readonly defaultedFields?: ProviderDefaultedFields;
   readonly commandId: CommandId;
   readonly threadId?: ThreadId;
   readonly reuseExistingThread?: boolean;
@@ -820,6 +823,23 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (input) {
+      // Imported/resumed threads carry durable choices. Resolve once before
+      // preparation, so later settings edits cannot alter this launch.
+      if (
+        !input.reuseExistingThread &&
+        !input.importedNativeThread &&
+        input.defaultedFields?.length
+      ) {
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(mapError(input, "resolve-project")),
+        );
+        const { defaultedFields: _, ...resolved } = resolveProviderNewSessionDefaults(
+          settings.providerInstances[input.modelSelection.instanceId]?.newSessionDefaults,
+          input,
+          input.defaultedFields,
+        );
+        input = resolved;
+      }
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,

@@ -829,3 +829,37 @@ describe("synchronized mobile model visibility", () => {
     ).toEqual(["hidden", "first", "second", "custom"]);
   });
 });
+
+it("uses provider-instance defaults for a fresh mobile task and preserves explicit picks", () => {
+  const instanceId = ProviderInstanceId.make("copilot_pool");
+  const selection = { instanceId, model: "auto" };
+  const config = {
+    providers: [],
+    settings: {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver: ProviderDriverKind.make("acpRegistry"),
+          newSessionDefaults: {
+            version: 1 as const,
+            model: "gpt-4.1",
+            options: [{ id: "allow_all", value: "on" }],
+          },
+        },
+      },
+    },
+  } as unknown as ServerConfig;
+  const input = {
+    config,
+    draftSelection: null,
+    projectDefaultSelection: selection,
+    stickySelection: null,
+    modelOptions: [],
+  };
+  expect(resolveNewTaskModelSelection(input)).toEqual({
+    instanceId,
+    model: "gpt-4.1",
+    options: [{ id: "allow_all", value: "on", required: true }],
+  });
+  expect(resolveNewTaskModelSelection({ ...input, draftSelection: selection })).toEqual(selection);
+});

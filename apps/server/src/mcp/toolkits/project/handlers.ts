@@ -1,3 +1,6 @@
+import { resolveProviderNewSessionDefaults } from "@t3tools/shared/model";
+import * as ServerSettings from "../../../serverSettings.ts";
+import { resolveRuntimeMode, resolveInteractionMode } from "../../OrchestratorMcpService.ts";
 import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -133,14 +136,30 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
+        const resolved =
+          caller === undefined
+            ? resolveProviderNewSessionDefaults(
+                (yield* (yield* ServerSettings.ServerSettingsService).getSettings.pipe(
+                  Effect.mapError(unavailable),
+                )).providerInstances[modelSelection.instanceId]?.newSessionDefaults,
+                { modelSelection, runtimeMode, interactionMode },
+                [
+                  ...(input.modelSelection === undefined ? ["model" as const] : []),
+                  "options",
+                  ...(input.runtimeMode === undefined ? ["runtimeMode" as const] : []),
+                  ...(input.interactionMode === undefined ? ["interactionMode" as const] : []),
+                ],
+              )
+            : { modelSelection, runtimeMode, interactionMode };
+        // Defaults are resolved before checking the invocation's permission ceiling.
+        yield* resolveRuntimeMode(context.limits.runtimeMode, resolved.runtimeMode);
+        yield* resolveInteractionMode(context.limits.interactionMode, resolved.interactionMode);
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
           projectId,
           title: input.title,
-          modelSelection,
-          runtimeMode,
-          interactionMode,
+          ...resolved,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },
           ...(input.message === undefined && attachments.length === 0
             ? {}

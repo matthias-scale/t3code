@@ -5907,7 +5907,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
           }
           for (const selection of configSelections) {
-            if (!availableConfigIds.has(selection.id)) continue;
+            const requiredFailure = () =>
+              EffectAcpErrors.AcpRequestError.internalError(
+                "A required native session default could not be applied. Check the provider's new-session defaults.",
+              );
+            if (!availableConfigIds.has(selection.id)) {
+              if (selection.required) return yield* requiredFailure();
+              continue;
+            }
             // Tuning knobs degrade instead of failing the session open: agents
             // advertise the union of values across models but can reject a
             // per-model invalid one at set time (codex-acp advertises "ultra"
@@ -5921,16 +5928,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const advertisedValues = option.options.flatMap((entry) =>
                 "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
               );
-              if (!advertisedValues.includes(selection.value)) continue;
+              if (!advertisedValues.includes(selection.value)) {
+                if (selection.required) return yield* requiredFailure();
+                continue;
+              }
             }
             yield* runtime.setConfigOption(selection.id, selection.value).pipe(
               Effect.catchTags({
                 AcpRequestError: (error) =>
-                  Effect.logWarning("ACP session rejected a configuration option value", {
-                    optionId: selection.id,
-                    value: selection.value,
-                    detail: error.message,
-                  }),
+                  selection.required
+                    ? Effect.fail(error)
+                    : Effect.logWarning("ACP session rejected a configuration option value", {
+                        optionId: selection.id,
+                        value: selection.value,
+                        detail: error.message,
+                      }),
               }),
             );
           }
@@ -5949,6 +5961,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           const effectiveModeState = yield* runtime.getModeState;
           const effectiveConfigOptions = yield* runtime.getConfigOptions;
+          for (const selection of optionSelections.filter((option) => option.required)) {
+            const acknowledged =
+              selection.id === ACP_SESSION_MODE_OPTION_ID && !hasNativeConfigWithSyntheticModeId
+                ? effectiveModeState?.currentModeId === selection.value
+                : effectiveConfigOptions.find((option) => option.id === selection.id)
+                    ?.currentValue === selection.value;
+            if (!acknowledged)
+              return yield* EffectAcpErrors.AcpRequestError.internalError(
+                "The provider did not acknowledge a required native session default. Check the provider's new-session defaults.",
+              );
+          }
           const planSensitiveOptions = effectiveConfigOptions.filter(
             (
               option,

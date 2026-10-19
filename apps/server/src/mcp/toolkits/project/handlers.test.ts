@@ -3,6 +3,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   type OrchestrationV2ThreadShell,
   type Project as ProjectRecord,
@@ -301,6 +302,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
 
 const clientLaunchHarness = (input: {
   readonly runtimeModeCeiling: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
@@ -311,7 +313,7 @@ const clientLaunchHarness = (input: {
     model: "claude-opus",
   };
   const layerDependencies = Layer.mergeAll(
-    ServerSettings.layerTest(),
+    ServerSettings.layerTest(input.settings),
     NodeCrypto.layer,
     Layer.succeed(McpInvocationContext.McpInvocationContext, {
       environmentId: EnvironmentId.make("environment"),
@@ -502,5 +504,66 @@ it.effect("a launch into a new worktree creates nothing when its base ref has no
 
     expect((yield* launchFrom("main")).at(-1)?.result).toMatchObject({ projectId });
     expect(launched).toHaveLength(1);
+  }),
+);
+
+it.effect("resolves external MCP defaults before checking the permission ceiling", () =>
+  Effect.gen(function* () {
+    for (const runtimeModeCeiling of ["approval-required", "full-access"] as const) {
+      const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+      const { projectId, dependencies } = clientLaunchHarness({
+        runtimeModeCeiling,
+        launched,
+        settings: {
+          providerInstances: {
+            [ProviderInstanceId.make("claudeAgent")]: {
+              driver: ProviderDriverKind.make("acpRegistry"),
+              newSessionDefaults: {
+                version: 1,
+                model: "gpt-4.1",
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                options: [{ id: "allow_all", value: "on" }],
+              },
+            },
+          },
+        },
+      });
+      const toolkit = yield* ProjectToolkit.pipe(
+        Effect.provide(
+          McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(
+            Layer.provide(dependencies),
+          ),
+        ),
+      );
+      const handle = (params: Parameters<typeof toolkit.handle<"t3_thread_launch">>[1]) =>
+        toolkit
+          .handle("t3_thread_launch", params)
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+      const result = yield* handle({ title: "Fresh", projectId });
+      if (runtimeModeCeiling === "approval-required") {
+        expect(result.at(-1)?.result).toMatchObject({ code: "runtime_mode_escalation_denied" });
+        expect(launched).toHaveLength(0);
+      } else {
+        expect(launched[0]?.modelSelection).toMatchObject({
+          model: "gpt-4.1",
+          options: [{ id: "allow_all", value: "on", required: true }],
+        });
+        yield* handle({
+          title: "Explicit",
+          projectId,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "gpt-4.1",
+            options: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "plan",
+        });
+        expect(launched[1]?.modelSelection.options).toEqual([]);
+        expect(launched[1]?.runtimeMode).toBe("approval-required");
+        expect(launched[1]?.interactionMode).toBe("plan");
+      }
+    }
   }),
 );
