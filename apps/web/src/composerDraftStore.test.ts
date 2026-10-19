@@ -17,7 +17,9 @@ import {
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ProviderOptionSelection,
+  type ServerProvider,
 } from "@t3tools/contracts";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
   collectAssistantCitations,
@@ -76,6 +78,7 @@ import {
   partializeComposerDraftStoreState,
   useComposerDraftStore,
   DraftId,
+  deriveEffectiveComposerModelState,
 } from "./composerDraftStore";
 import { removeLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 import { insertInlineContextReference } from "./lib/composerContextReferences";
@@ -164,7 +167,11 @@ function modelSelection(
   model: string,
   options?: Record<string, string | boolean | undefined>,
 ): ModelSelection {
-  return createModelSelection(defaultInstanceIdForDriver(provider), model, toSelections(options));
+  return createModelSelection(
+    defaultInstanceIdForDriver(provider),
+    model,
+    options === undefined ? undefined : toSelections(options),
+  );
 }
 
 function providerModelOptions(
@@ -2042,6 +2049,113 @@ describe("composerDraftStore modelSelection", () => {
     ).toEqual(modelSelection(CODEX_DRIVER, "gpt-5.4", { reasoningEffort: "xhigh" }));
   });
 
+  it("keeps the displayed provider-default model when native options are edited", () => {
+    const instanceId = ProviderInstanceId.make("copilot_pool");
+    const driver = ProviderDriverKind.make("acpRegistry");
+    const store = useComposerDraftStore.getState();
+    const inherited = createModelSelection(instanceId, "auto");
+    store.setModelSelection(threadRef, inherited);
+    store.setStickyModelSelection(inherited);
+    const input = {
+      providers: [
+        {
+          instanceId,
+          driver,
+          enabled: true,
+          installed: true,
+          version: null,
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: "2026-01-01T00:00:00.000Z",
+          models: ["auto", "gpt-4.1"].map((slug) => ({
+            slug,
+            name: slug,
+            isCustom: false,
+            capabilities: {},
+          })),
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider,
+      ],
+      selectedProvider: driver,
+      selectedInstanceId: instanceId,
+      threadModelSelection: null,
+      projectModelSelection: inherited,
+      settings: {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [instanceId]: {
+            driver,
+            newSessionDefaults: {
+              version: 1 as const,
+              model: "gpt-4.1",
+              options: [{ id: "allow_all", value: "on" }],
+            },
+          },
+        },
+      },
+    };
+    const displayed = deriveEffectiveComposerModelState({
+      ...input,
+      draft: draftFor(threadId, TEST_ENVIRONMENT_ID),
+    });
+    expect(displayed.selectedModel).toBe("gpt-4.1");
+
+    store.setProviderModelOptions(threadRef, driver, [{ id: "allow_all", value: "off" }], {
+      instanceId,
+      model: displayed.selectedModel,
+      persistSticky: true,
+    });
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    const expected = createModelSelection(instanceId, "gpt-4.1", [
+      { id: "allow_all", value: "off" },
+    ]);
+    expect(draft?.modelSelectionExplicit).toBe(true);
+    expect(draft?.modelSelectionByProvider[instanceId]).toEqual(expected);
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[instanceId]).toEqual(
+      expected,
+    );
+    expect(deriveEffectiveComposerModelState({ ...input, draft })).toEqual({
+      selectedModel: "gpt-4.1",
+      modelOptions: { [instanceId]: expected.options },
+    });
+    expect(
+      deriveEffectiveComposerModelState({
+        ...input,
+        draft: {
+          activeProvider: instanceId,
+          modelSelectionByProvider: useComposerDraftStore.getState().stickyModelSelectionByProvider,
+        },
+      }).selectedModel,
+    ).toBe("gpt-4.1");
+  });
+
+  it.each([{ options: [] }, { options: [{ id: "allow_all", value: "on", required: true }] }])(
+    "persists native option intent through storage: %j",
+    async ({ options }) => {
+      vi.useFakeTimers();
+      try {
+        const instanceId = ProviderInstanceId.make("copilot_pool");
+        const store = useComposerDraftStore.getState();
+        const selection = createModelSelection(instanceId, "gpt-4.1", options);
+        store.setModelSelection(threadRef, selection, { explicit: true, replaceOptions: true });
+        store.setStickyModelSelection(selection);
+        await vi.advanceTimersByTimeAsync(300);
+        resetComposerDraftStore();
+        await useComposerDraftStore.persist.rehydrate();
+        expect(
+          draftFor(threadId, TEST_ENVIRONMENT_ID)?.modelSelectionByProvider[instanceId],
+        ).toEqual(selection);
+        expect(useComposerDraftStore.getState().stickyModelSelectionByProvider[instanceId]).toEqual(
+          selection,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("keeps explicit default-state overrides on the selection", () => {
     const store = useComposerDraftStore.getState();
 
@@ -2375,7 +2489,7 @@ describe("composerDraftStore per-model sticky options", () => {
 
     expect(useComposerDraftStore.getState().stickyOptionsByModelByProvider[CODEX_INSTANCE]).toEqual(
       {
-        "gpt-5.4": toSelections({ reasoningEffort: "high" }),
+        "gpt-5.3-codex": toSelections({ reasoningEffort: "xhigh" }),
       },
     );
   });
@@ -2466,7 +2580,7 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
   });
 
-  it("normalizes empty sticky model options by dropping selection options", () => {
+  it("keeps model-only sticky selections without options", () => {
     const store = useComposerDraftStore.getState();
 
     store.setStickyModelSelection(modelSelection(CODEX_DRIVER, "gpt-5.4"));
@@ -2477,7 +2591,7 @@ describe("composerDraftStore sticky composer settings", () => {
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("codex");
   });
 
-  it("drops empty cursor model options when normalizing sticky state", () => {
+  it("preserves explicit empty cursor model options when normalizing sticky state", () => {
     const store = useComposerDraftStore.getState();
 
     store.setStickyModelSelection(
@@ -2491,7 +2605,7 @@ describe("composerDraftStore sticky composer settings", () => {
 
     expect(
       useComposerDraftStore.getState().stickyModelSelectionByProvider[CURSOR_INSTANCE],
-    ).toEqual(modelSelection(CURSOR_DRIVER, "gpt-5.4"));
+    ).toEqual(createModelSelection(CURSOR_INSTANCE, "gpt-5.4", []));
     expect(useComposerDraftStore.getState().stickyActiveProvider).toBe("cursor");
   });
 
