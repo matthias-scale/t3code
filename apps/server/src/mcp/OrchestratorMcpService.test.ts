@@ -18,6 +18,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import {
@@ -1968,6 +1969,84 @@ describe("OrchestratorMcpService provider resolution", () => {
           ),
         ),
       );
+
+    it.effect(
+      "snapshots instance defaults for a new external schedule and enforces its ceiling",
+      () =>
+        Effect.gen(function* () {
+          const instanceId = ProviderInstanceId.make("copilot_pool");
+          for (const access of ["approval-required", "full-access"] as const) {
+            const saved = yield* Ref.make<ScheduledTask | null>(null);
+            const deps = Layer.mergeAll(
+              NodeServices.layer,
+              Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+              ServerSettings.layerTest({
+                providerInstances: {
+                  [instanceId]: {
+                    driver: ProviderDriverKind.make("acpRegistry"),
+                    newSessionDefaults: {
+                      version: 1,
+                      model: "gpt-4.1",
+                      runtimeMode: "full-access",
+                      interactionMode: "default",
+                      options: [{ id: "allow_all", value: "on" }],
+                    },
+                  },
+                },
+              }),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+              Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                list: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProjectService.ProjectService)({
+                getById: () =>
+                  Effect.succeed(
+                    Option.some({
+                      id: projectId,
+                      deletedAt: null,
+                      defaultModelSelection: { instanceId, model: "auto" },
+                    } as never),
+                  ),
+              }),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                upsert: (input) => {
+                  const created = task({
+                    id: ScheduledTaskId.make("defaults:schedule"),
+                    modelSelection: input.modelSelection,
+                    runtimeMode: input.runtimeMode,
+                    interactionMode: input.interactionMode,
+                  });
+                  return Ref.set(saved, created).pipe(Effect.as({ task: created }));
+                },
+              }),
+            );
+            const result = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+              Effect.flatMap((mcp) =>
+                mcp.scheduleTask(
+                  { ...supervisedClient, client: { ...supervisedClient.client!, access } },
+                  { projectId, prompt: "Audit", schedule: { type: "interval", everyMs: 3600000 } },
+                ),
+              ),
+              Effect.result,
+              Effect.provide(layerOrchestratorService.pipe(Layer.provide(deps))),
+            );
+            const created = yield* Ref.get(saved);
+            if (access === "approval-required") {
+              assert.equal(result._tag, "Failure");
+              assert.isNull(created);
+            } else {
+              assert.equal(result._tag, "Success");
+              assert.equal(created?.runtimeMode, "full-access");
+              assert.deepEqual(created?.modelSelection, {
+                instanceId,
+                model: "gpt-4.1",
+                options: [{ id: "allow_all", value: "on", required: true }],
+              });
+            }
+          }
+        }),
+    );
 
     it.effect("hides a webhook URL from a caller below the task's modes", () =>
       Effect.gen(function* () {
