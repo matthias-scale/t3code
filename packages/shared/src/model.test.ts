@@ -1,3 +1,4 @@
+import { resolveProviderNewSessionDefaults } from "./model.ts";
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
 
@@ -360,4 +361,85 @@ describe("provider-reported option display", () => {
   ])("ignores reports after changing the model, instance, or option: %j", (selected) => {
     expect(getProviderOptionCurrentLabel(descriptor, selected, reported)).toBe("Unknown");
   });
+});
+
+describe("resolveProviderNewSessionDefaults", () => {
+  const fallback = {
+    modelSelection: { instanceId: ProviderInstanceId.make("copilot_pool"), model: "auto" },
+    runtimeMode: "approval-required" as const,
+    interactionMode: "plan" as const,
+  };
+  const defaults = {
+    version: 1 as const,
+    model: "gpt-4.1",
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    options: [{ id: "allow_all", value: "on" }],
+  };
+  it("resolves only defaulted fields and marks native defaults required", () => {
+    expect(
+      resolveProviderNewSessionDefaults(defaults, fallback, [
+        "model",
+        "options",
+        "runtimeMode",
+        "interactionMode",
+      ]),
+    ).toEqual({
+      modelSelection: {
+        instanceId: fallback.modelSelection.instanceId,
+        model: "gpt-4.1",
+        options: [{ id: "allow_all", value: "on", required: true }],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    });
+  });
+  it("preserves fully materialized explicit and saved selections", () => {
+    expect(resolveProviderNewSessionDefaults(defaults, fallback)).toEqual(fallback);
+  });
+  it("preserves explicit options by id and does not leak defaults to another model", () => {
+    const explicit = {
+      ...fallback,
+      modelSelection: {
+        ...fallback.modelSelection,
+        model: "gpt-4.1",
+        options: [{ id: "allow_all", value: "off" }],
+      },
+    };
+    expect(
+      resolveProviderNewSessionDefaults(defaults, explicit, ["options"]).modelSelection.options,
+    ).toEqual(explicit.modelSelection.options);
+    expect(resolveProviderNewSessionDefaults(defaults, fallback, ["options"])).toEqual(fallback);
+  });
+  it("leaves unconfigured instances unchanged", () => {
+    expect(resolveProviderNewSessionDefaults(undefined, fallback, ["model", "options"])).toEqual(
+      fallback,
+    );
+  });
+});
+
+it("preserves explicit empty options and distinguishes required provenance", () => {
+  const modelSelection = {
+    instanceId: ProviderInstanceId.make("pool"),
+    model: "gpt-4.1",
+    options: [],
+  };
+  const input = {
+    modelSelection,
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+  };
+  expect(
+    resolveProviderNewSessionDefaults(
+      { version: 1, model: "gpt-4.1", options: [{ id: "allow_all", value: "on" }] },
+      input,
+      ["options"],
+    ),
+  ).toEqual(input);
+  expect(
+    modelSelectionsEqual(
+      { ...modelSelection, options: [{ id: "allow_all", value: "on" }] },
+      { ...modelSelection, options: [{ id: "allow_all", value: "on", required: true }] },
+    ),
+  ).toBe(false);
 });

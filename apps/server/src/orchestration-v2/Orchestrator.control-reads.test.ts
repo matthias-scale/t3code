@@ -996,6 +996,7 @@ it.effect.each([false, true])("rejects thread.create for an existing id (deleted
       commandId: CommandId.make(`duplicate:${threadId}`),
       title: "Replacement",
       importedNativeThread: undefined,
+      defaultedFields: ["model", "options", "runtimeMode", "interactionMode"] as const,
     };
     const outcome = yield* orchestrator.dispatch(duplicate).pipe(Effect.result);
     assert.ok(Result.isFailure(outcome), "duplicate create must be rejected");

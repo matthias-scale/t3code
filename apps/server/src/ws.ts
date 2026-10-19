@@ -1939,6 +1939,9 @@ const layerWsRpc = (
                     ...(input.generateTitle === undefined
                       ? {}
                       : { generateTitle: input.generateTitle }),
+                    ...(input.defaultedFields === undefined
+                      ? {}
+                      : { defaultedFields: input.defaultedFields }),
                     modelSelection: input.modelSelection,
                     runtimeMode: input.runtimeMode,
                     interactionMode: input.interactionMode,

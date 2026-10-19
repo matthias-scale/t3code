@@ -1,3 +1,4 @@
+import { resolveProviderNewSessionDefaults } from "@t3tools/shared/model";
 import * as Dialog from "../../components/ui/Dialog";
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { useEnvironmentPresentation } from "../../state/presentation";
@@ -506,7 +507,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const defaultRuntimeMode = editingPendingTask
     ? (editingPendingTask.runtimeMode ?? DEFAULT_RUNTIME_MODE)
     : projectSettings.settings.defaultRuntimeMode;
-  const runtimeMode = selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
 
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model.
@@ -533,12 +533,37 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     selectedProject?.id ?? null,
   );
 
-  const selectedModel = resolveNewTaskModelSelection({
+  const fallbackModel = resolveNewTaskModelSelection({
+    config: editingPendingTask ? null : selectedEnvironmentServerConfig,
     draftSelection: draftModelSelection,
     projectDefaultSelection: projectDefaultModelSelection,
     stickySelection: stickyModelSelection,
     modelOptions,
   });
+  const resolvedSessionDefaults =
+    fallbackModel && !editingPendingTask
+      ? resolveProviderNewSessionDefaults(
+          selectedEnvironmentServerConfig?.settings?.providerInstances[fallbackModel.instanceId]
+            ?.newSessionDefaults,
+          {
+            modelSelection: fallbackModel,
+            runtimeMode: selectedProjectDraft.runtimeMode ?? defaultRuntimeMode,
+            interactionMode:
+              selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          [
+            ...(draftModelSelection ? [] : ["model" as const]),
+            "options",
+            ...(selectedProjectDraft.runtimeMode === undefined ? ["runtimeMode" as const] : []),
+            ...(selectedProjectDraft.interactionMode === undefined
+              ? ["interactionMode" as const]
+              : []),
+          ],
+        )
+      : null;
+  const selectedModel = resolvedSessionDefaults?.modelSelection ?? fallbackModel;
+  const runtimeMode =
+    resolvedSessionDefaults?.runtimeMode ?? selectedProjectDraft.runtimeMode ?? defaultRuntimeMode;
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`
     : null;
@@ -557,7 +582,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   const planModeEnabled =
     legacyPlanModeEnabled && selectedProviderStatus?.showInteractionModeToggle !== false;
   const interactionMode = planModeEnabled
-    ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
+    ? (resolvedSessionDefaults?.interactionMode ??
+      selectedProjectDraft.interactionMode ??
+      DEFAULT_PROVIDER_INTERACTION_MODE)
     : DEFAULT_PROVIDER_INTERACTION_MODE;
   const setSelectedModelKey = (
     key: string | null,
@@ -948,12 +975,22 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     }
     const draft = getComposerDraftSnapshot(selectedProjectDraftKey);
     const text = draft.text.trim();
-    const draftModelSelection =
+    const rawDraftModelSelection =
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
         selectedProject.id,
       ) ?? selectedModel;
+    const draftModelSelection =
+      rawDraftModelSelection && !editingPendingTask
+        ? resolveProviderNewSessionDefaults(
+            selectedEnvironmentServerConfig?.settings?.providerInstances[
+              rawDraftModelSelection.instanceId
+            ]?.newSessionDefaults,
+            { modelSelection: rawDraftModelSelection, runtimeMode, interactionMode },
+            ["options"],
+          ).modelSelection
+        : rawDraftModelSelection;
     if ((text.length === 0 && draft.attachments.length === 0) || !draftModelSelection) {
       return null;
     }
@@ -979,11 +1016,11 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       attachments: draft.attachments,
       context: draft.context,
       modelSelection: draftModelSelection,
-      runtimeMode: draft.runtimeMode ?? defaultRuntimeMode,
+      runtimeMode: draft.runtimeMode ?? resolvedSessionDefaults?.runtimeMode ?? defaultRuntimeMode,
       interactionMode: resolvePendingTaskInteractionMode({
         preferenceLoaded: planModePreferenceLoaded,
         planModeEnabled: legacyPlanModeEnabled,
-        draftInteractionMode: draft.interactionMode,
+        draftInteractionMode: draft.interactionMode ?? resolvedSessionDefaults?.interactionMode,
         queuedInteractionMode: editingPendingTask?.interactionMode,
         provider: selectedEnvironmentServerConfig?.providers.find(
           (candidate) => candidate.instanceId === draftModelSelection.instanceId,

@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import { RuntimeMode, ProviderInteractionMode } from "./providerPolicy.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const PROVIDER_SLUG_MAX_CHARS = 64;
@@ -46,6 +47,34 @@ export type ProviderInstanceEnvironmentVariable = typeof ProviderInstanceEnviron
 export const ProviderInstanceEnvironment = Schema.Array(ProviderInstanceEnvironmentVariable);
 export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Type;
 
+/** Fields carrying fallback values rather than an explicit new-session choice. */
+export const ProviderDefaultedFields = Schema.Array(
+  Schema.Literals(["model", "options", "runtimeMode", "interactionMode"]),
+);
+export type ProviderDefaultedFields = typeof ProviderDefaultedFields.Type;
+
+export const ProviderNewSessionDefaults = Schema.Struct({
+  version: Schema.Literal(1),
+  model: TrimmedNonEmptyString,
+  options: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        value: Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
+      }),
+    ).check(
+      Schema.makeFilter(
+        (options) =>
+          new Set(options.map((option) => option.id)).size === options.length ||
+          "Native default option ids must be unique",
+      ),
+    ),
+  ),
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(ProviderInteractionMode),
+});
+export type ProviderNewSessionDefaults = typeof ProviderNewSessionDefaults.Type;
+
 /**
  * The driver-specific config payload is left as `Schema.Unknown`; each driver
  * registers its own decoder with the runtime registry, and envelopes for
@@ -59,7 +88,15 @@ export const ProviderInstanceConfig = Schema.Struct({
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   enabled: Schema.optionalKey(Schema.Boolean),
   config: Schema.optionalKey(Schema.Unknown),
-});
+  newSessionDefaults: Schema.optionalKey(ProviderNewSessionDefaults),
+}).check(
+  Schema.makeFilter(
+    (instance) =>
+      !instance.newSessionDefaults?.options?.length ||
+      instance.driver === "acpRegistry" ||
+      "Native new-session option defaults require an ACP registry provider instance",
+  ),
+);
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;
 
 export const ProviderInstanceMutation = Schema.Union([

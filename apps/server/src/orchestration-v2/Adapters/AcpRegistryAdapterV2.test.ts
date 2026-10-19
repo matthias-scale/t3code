@@ -163,6 +163,10 @@ describe("AcpRegistryAdapterV2", () => {
       readonly setup: unknown;
       readonly modeFrames: ReadonlyArray<Frame>;
       readonly storedModePick: string;
+      readonly optionId?: string;
+      readonly required?: boolean;
+      readonly expectFailure?: boolean;
+      readonly interactionMode?: "default" | "plan";
     }) {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -210,24 +214,158 @@ describe("AcpRegistryAdapterV2", () => {
           fileSystem,
         }),
       }).pipe(Effect.provide(layerInjectedRuntimeCatalog));
-      yield* adapter
+      const result = yield* adapter
         .openSession({
           threadId: ThreadId.make("thread-acp-registry-mode-pick"),
           providerSessionId: ProviderSessionId.make("provider-session-mode-pick"),
           modelSelection: {
             instanceId,
             model: "default",
-            options: [{ id: ACP_SESSION_MODE_OPTION_ID, value: input.storedModePick }],
+            options: [
+              {
+                id: input.optionId ?? ACP_SESSION_MODE_OPTION_ID,
+                value: input.storedModePick,
+                ...(input.required ? { required: true } : {}),
+              },
+            ],
           },
           runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
             runtimeMode: "approval-required",
-            interactionMode: "default",
+            interactionMode: input.interactionMode ?? "default",
             cwd: replayDir,
           }),
         })
-        .pipe(Effect.scoped);
+        .pipe(Effect.scoped, Effect.result);
+      assert.equal(result._tag, input.expectFailure ? "Failure" : "Success");
       yield* makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript);
     });
+
+    it.effect("rejects a required native mode overwritten by plan interaction", () =>
+      openWithStoredModePick({
+        setup: {
+          modes: {
+            currentModeId: "default",
+            availableModes: ["default", "autopilot", "plan"].map((id) => ({ id, name: id })),
+          },
+        },
+        modeFrames: [
+          outbound("session/set_mode"),
+          answer("session/set_mode", {}),
+          outbound("session/set_mode"),
+          answer("session/set_mode", {}),
+        ],
+        storedModePick: "autopilot",
+        required: true,
+        interactionMode: "plan",
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect.each(["mode", "collaboration_mode"])(
+      "rejects a required %s option overwritten by plan interaction",
+      (category) => {
+        const option = (currentValue: string) => ({
+          id: "native-mode",
+          name: "Native mode",
+          category,
+          type: "select",
+          currentValue,
+          options: ["default", "autopilot", "plan"].map((value) => ({ value, name: value })),
+        });
+        return openWithStoredModePick({
+          setup: { configOptions: [option("default")] },
+          modeFrames: [
+            outbound("session/set_config_option"),
+            answer("session/set_config_option", { configOptions: [option("autopilot")] }),
+            outbound("session/set_config_option"),
+            answer("session/set_config_option", { configOptions: [option("plan")] }),
+          ],
+          storedModePick: "autopilot",
+          optionId: "native-mode",
+          required: true,
+          interactionMode: "plan",
+          expectFailure: true,
+        }).pipe(Effect.provide(layerTest), Effect.scoped);
+      },
+    );
+
+    it.effect("fails before prompting when a required default is absent", () =>
+      openWithStoredModePick({
+        setup: {},
+        modeFrames: [],
+        storedModePick: "autopilot",
+        required: true,
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("fails if a provider accepts but does not acknowledge a required mode", () =>
+      openWithStoredModePick({
+        setup: { configOptions: [permissionModeOption("ask")] },
+        modeFrames: [
+          outbound("session/set_config_option"),
+          answer("session/set_config_option", { configOptions: [permissionModeOption("ask")] }),
+        ],
+        storedModePick: "auto",
+        optionId: "permission-mode",
+        required: true,
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("applies and verifies a required native option", () =>
+      openWithStoredModePick({
+        setup: { configOptions: [permissionModeOption("ask")] },
+        modeFrames: [
+          outbound("session/set_config_option"),
+          answer("session/set_config_option", { configOptions: [permissionModeOption("auto")] }),
+        ],
+        storedModePick: "auto",
+        optionId: "permission-mode",
+        required: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("rejects unsupported required native values before making a request", () =>
+      openWithStoredModePick({
+        setup: { configOptions: [permissionModeOption("ask")] },
+        modeFrames: [],
+        storedModePick: "autopilot",
+        optionId: "permission-mode",
+        required: true,
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("keeps legacy unsupported options best effort", () =>
+      openWithStoredModePick({
+        setup: {},
+        modeFrames: [],
+        storedModePick: "auto",
+        optionId: "permission-mode",
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect("propagates a provider rejection of a required native default", () =>
+      openWithStoredModePick({
+        setup: { configOptions: [permissionModeOption("ask")] },
+        modeFrames: [
+          outbound("session/set_config_option"),
+          {
+            type: "emit_inbound",
+            frame: {
+              kind: "response",
+              method: "session/set_config_option",
+              error: { code: -32603, message: "Not supported" },
+            },
+          },
+        ],
+        storedModePick: "auto",
+        optionId: "permission-mode",
+        required: true,
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
 
     it.effect("switches an agent that only advertises modes with session/set_mode", () =>
       openWithStoredModePick({

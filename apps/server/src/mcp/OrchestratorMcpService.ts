@@ -1,3 +1,4 @@
+import { resolveProviderNewSessionDefaults } from "@t3tools/shared/model";
 import {
   CommandId,
   type RunId,
@@ -1657,6 +1658,27 @@ const make = Effect.gen(function* () {
         }
         const modelSelection =
           parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+        const selection = {
+          modelSelection,
+          runtimeMode: limits.runtimeMode,
+          interactionMode: limits.interactionMode,
+        };
+        // A new external schedule snapshots instance defaults now. Existing and
+        // caller-inherited schedules retain their already explicit selections.
+        const resolved =
+          parent === undefined
+            ? resolveProviderNewSessionDefaults(
+                (yield* serverSettings.getSettings.pipe(
+                  Effect.mapError(() =>
+                    failure("orchestration_error", "Unable to read server settings."),
+                  ),
+                )).providerInstances[modelSelection.instanceId]?.newSessionDefaults,
+                selection,
+                ["model", "options", "runtimeMode", "interactionMode"],
+              )
+            : selection;
+        yield* resolveRuntimeMode(limits.runtimeMode, resolved.runtimeMode);
+        yield* resolveInteractionMode(limits.interactionMode, resolved.interactionMode);
         const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
         const title =
           input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task");
@@ -1668,9 +1690,7 @@ const make = Effect.gen(function* () {
           projectId,
           threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
           workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
-          modelSelection,
-          runtimeMode: limits.runtimeMode,
-          interactionMode: limits.interactionMode,
+          ...resolved,
           createdBy: "agent",
           creationSource: "mcp",
           // Scope the idempotency key by provider session so two callers

@@ -108,8 +108,40 @@ instance:
 ## Model defaults
 
 T3 Code remembers your provider, model, and model options for new threads. A
-project's configured model takes precedence; resetting that project setting
-returns to the remembered selection.
+project's configured model takes precedence over remembered selections; resetting
+that project setting returns to the remembered selection. An instance's configured
+new-session defaults take precedence over both fallback sources; explicit composer
+picks still win.
+
+An environment can also set `newSessionDefaults` on a provider instance through
+the existing provider-instance settings RPC. Preserve the instance's existing
+configuration and add this field to its envelope:
+
+```json
+{
+  "driver": "acpRegistry",
+  "newSessionDefaults": {
+    "version": 1,
+    "model": "gpt-4.1",
+    "runtimeMode": "full-access",
+    "interactionMode": "default",
+    "options": [
+      { "id": "mode", "value": "https://agentclientprotocol.com/protocol/session-modes#autopilot" },
+      { "id": "allow_all", "value": "on" }
+    ]
+  }
+}
+```
+
+Native `options` defaults require an ACP registry instance in version 1. They apply
+only to the configured model; explicit values for an option take precedence, and an
+explicit empty options array suppresses them. A provider that cannot apply or
+acknowledge a required native default fails before the first prompt. Autopilot
+controls continuation; `runtimeMode` controls T3 permissions. Neither implies the
+other. New launch/create RPC requests can identify fallback fields using
+`defaultedFields` (`model`, `options`, `runtimeMode`, `interactionMode`); omitted masks
+preserve existing fully specified requests. Scheduled tasks store their selections,
+and resumed or imported sessions keep their saved choices.
 
 Leaving reasoning level or service tier unset uses the provider's own configuration.
 

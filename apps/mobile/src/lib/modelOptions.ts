@@ -9,6 +9,7 @@ import type {
 import { resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
+  resolveProviderNewSessionDefaults,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
 
@@ -212,19 +213,25 @@ export function resolveDefaultableModelSelection(
 }
 
 export function resolveNewTaskModelSelection(input: {
+  readonly config?: T3ServerConfig | null | undefined;
   readonly draftSelection: ModelSelection | null;
   readonly projectDefaultSelection: ModelSelection | null;
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
-  return (
+  const selection =
     input.draftSelection ??
     input.projectDefaultSelection ??
     input.stickySelection ??
     input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
     input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
-    null
-  );
+    null;
+  if (!selection || !input.config) return selection;
+  return resolveProviderNewSessionDefaults(
+    input.config.settings?.providerInstances[selection.instanceId]?.newSessionDefaults,
+    { modelSelection: selection, runtimeMode: "full-access", interactionMode: "default" },
+    [...(input.draftSelection ? [] : ["model" as const]), "options"],
+  ).modelSelection;
 }
 
 export function buildModelOptions(
