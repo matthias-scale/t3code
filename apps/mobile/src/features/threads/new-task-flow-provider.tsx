@@ -1052,7 +1052,6 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     };
   };
 
-
   const finishEditingPendingTask = () => {
     const editing = editingPendingTaskRef.current;
     editingPendingTaskRef.current = null;
