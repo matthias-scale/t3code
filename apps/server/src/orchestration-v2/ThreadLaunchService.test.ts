@@ -3047,3 +3047,77 @@ it.effect.each(
       }).pipe(Effect.provide(Layer.merge(harness.layer, layerService)));
     }),
 );
+
+it.effect(
+  "snapshots provider defaults only for fresh launches and preserves explicit or resumed choices",
+  () => {
+    const harness = makeHarness({
+      serverSettings: {
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            newSessionDefaults: {
+              version: 1,
+              model: "gpt-5.4",
+              runtimeMode: "full-access",
+              interactionMode: "default",
+            },
+          },
+        },
+      },
+    });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const input = {
+        ...launchInput({ command: "defaults:fresh", thread: "defaults:fresh" }),
+        runtimeMode: "approval-required" as const,
+        interactionMode: "plan" as const,
+        defaultedFields: ["model", "options", "runtimeMode", "interactionMode"] as const,
+      };
+      const created = yield* launches.launch(input);
+      const snapshot = (yield* threads.getThreadProjection(created.threadId)).thread;
+      assert.equal(snapshot.modelSelection.model, "gpt-5.4");
+      assert.equal(snapshot.runtimeMode, "full-access");
+      assert.equal(snapshot.interactionMode, "default");
+      assert.isUndefined(snapshot.modelSelection.options);
+      const explicit = yield* launches.launch({
+        ...input,
+        defaultedFields: [],
+        commandId: CommandId.make("defaults:explicit"),
+        threadId: ThreadId.make("defaults:explicit"),
+      });
+      assert.deepEqual(
+        (yield* threads.getThreadProjection(explicit.threadId)).thread.modelSelection,
+        modelSelection,
+      );
+      assert.equal(
+        (yield* threads.getThreadProjection(explicit.threadId)).thread.runtimeMode,
+        "approval-required",
+      );
+      yield* settings.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            newSessionDefaults: { version: 1, model: "later-model" },
+          },
+        },
+      });
+      assert.deepEqual(
+        (yield* threads.getThreadProjection(created.threadId)).thread.modelSelection,
+        snapshot.modelSelection,
+      );
+      yield* launches.launch({
+        ...input,
+        commandId: CommandId.make("defaults:reuse"),
+        threadId: explicit.threadId,
+        reuseExistingThread: true,
+      });
+      assert.deepEqual(
+        (yield* threads.getThreadProjection(explicit.threadId)).thread.modelSelection,
+        modelSelection,
+      );
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

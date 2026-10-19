@@ -1,3 +1,4 @@
+import type { ProviderDefaultedFields } from "@t3tools/contracts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import {
   type ThreadLinkedPullRequest,
@@ -68,6 +69,7 @@ export interface DeleteProjectInput extends CommandMetadata {
 }
 
 export interface CreateThreadInput extends CommandMetadata {
+  readonly defaultedFields?: ProviderDefaultedFields;
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
   readonly title: string;
@@ -388,6 +390,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
 ) {
   return yield* dispatch({
     type: "thread.create",
+    ...(input.defaultedFields === undefined ? {} : { defaultedFields: input.defaultedFields }),
     commandId: yield* allocateCommandId(input),
     createdBy: "user",
     creationSource: input.creationSource ?? "web",

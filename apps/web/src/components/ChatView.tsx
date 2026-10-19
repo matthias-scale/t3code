@@ -1523,10 +1523,6 @@ export default function ChatView(props: ChatViewProps) {
   const [, setThreadErrorBannerDismissTick] = useState(0);
   const defaultRuntimeMode = resolveProjectSettings(settings, activeThread?.projectId ?? null)
     .settings.defaultRuntimeMode;
-  const runtimeMode =
-    composerRuntimeMode ??
-    (isServerThread ? activeThread?.runtimeMode : undefined) ??
-    defaultRuntimeMode;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = canWriteSourceControl && isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
@@ -2472,11 +2468,24 @@ export default function ChatView(props: ChatViewProps) {
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
+  const providerSessionDefaults =
+    !isServerThread && activeProviderInstanceId
+      ? settings.providerInstances[activeProviderInstanceId]?.newSessionDefaults
+      : undefined;
+  const runtimeMode =
+    composerRuntimeMode ??
+    (isServerThread ? activeThread?.runtimeMode : undefined) ??
+    providerSessionDefaults?.runtimeMode ??
+    defaultRuntimeMode;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
     planModeEnabled: settings.planModeEnabled,
     provider: activeProviderStatus,
     interactionMode:
-      composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+      composerInteractionMode ??
+      (isServerThread ? activeThread?.interactionMode : undefined) ??
+      providerSessionDefaults?.interactionMode ??
+      activeThread?.interactionMode ??
+      DEFAULT_INTERACTION_MODE,
   });
   const conversationProviderStatus =
     providerStatuses.find((status) => status.instanceId === activeRuntime?.providerInstanceId) ??
@@ -8388,7 +8397,9 @@ export default function ChatView(props: ChatViewProps) {
                               activeProjectDefaultModelSelection={
                                 activeProjectDefaultModelSelection
                               }
-                              activeThreadModelSelection={activeThread?.modelSelection}
+                              activeThreadModelSelection={
+                                isServerThread ? activeThread?.modelSelection : undefined
+                              }
                               activeProjectId={activeProject?.id ?? null}
                               activeContextWindow={activeContextWindow}
                               activeTasksProgress={activeComposerTasksProgress}

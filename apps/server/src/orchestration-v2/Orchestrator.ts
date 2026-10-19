@@ -1,3 +1,4 @@
+import { resolveProviderNewSessionDefaults } from "@t3tools/shared/model";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -2208,6 +2209,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": command.threadId,
       "orchestration_v2.driver": command.modelSelection.instanceId,
     });
+
+    if (command.importedNativeThread === undefined && command.defaultedFields?.length) {
+      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+      command = resolveProviderNewSessionDefaults(
+        settings.providerInstances[command.modelSelection.instanceId]?.newSessionDefaults,
+        command,
+        command.defaultedFields,
+      );
+    }
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);

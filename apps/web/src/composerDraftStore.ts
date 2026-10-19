@@ -37,7 +37,11 @@ import * as Schema from "effect/Schema";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
 import { DeepMutable } from "effect/Types";
-import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  normalizeModelSlug,
+  resolveProviderNewSessionDefaults,
+} from "@t3tools/shared/model";
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { readThreadPreviewState } from "./previewStateStore";
@@ -625,6 +629,7 @@ export interface EffectiveComposerModelState {
 }
 
 interface ComposerDraftModelState {
+  modelSelectionExplicit?: boolean;
   activeProvider: ProviderInstanceId | null;
   modelSelectionByProvider: Partial<Record<ProviderInstanceId, ModelSelection>>;
 }
@@ -636,7 +641,7 @@ function providerSelectionsFromModelSelection(
     return null;
   }
   const options = modelSelection.options;
-  if (!options || options.length === 0) {
+  if (!options) {
     return null;
   }
   return { [modelSelection.instanceId]: options };
@@ -648,7 +653,7 @@ function modelSelectionByProviderToOptions(
   if (!map) return null;
   const result: ProviderOptionSelectionsByProvider = {};
   for (const [provider, selection] of Object.entries(map)) {
-    if (selection?.options && selection.options.length > 0) {
+    if (selection?.options) {
       result[provider] = selection.options;
     }
   }
@@ -1080,7 +1085,10 @@ function legacyToModelSelectionByProvider(
 
 export function deriveEffectiveComposerModelState(input: {
   draft:
-    | Pick<ComposerThreadDraftState, "modelSelectionByProvider" | "activeProvider">
+    | Pick<
+        ComposerThreadDraftState,
+        "modelSelectionByProvider" | "activeProvider" | "modelSelectionExplicit"
+      >
     | null
     | undefined;
   providers: ReadonlyArray<ServerProvider>;
@@ -1151,6 +1159,27 @@ export function deriveEffectiveComposerModelState(input: {
     providerSelectionsFromModelSelection(input.projectModelSelection) ??
     null;
 
+  if (input.selectedInstanceId && !input.threadModelSelection) {
+    const resolved = resolveProviderNewSessionDefaults(
+      input.settings.providerInstances[input.selectedInstanceId]?.newSessionDefaults,
+      {
+        modelSelection: createModelSelection(
+          input.selectedInstanceId,
+          selectedModel,
+          activeSelection?.options ?? modelOptions?.[input.selectedInstanceId],
+        ),
+        runtimeMode: DEFAULT_RUNTIME_MODE,
+        interactionMode: DEFAULT_INTERACTION_MODE,
+      },
+      [...(input.draft?.modelSelectionExplicit ? [] : ["model" as const]), "options"],
+    ).modelSelection;
+    return {
+      selectedModel: resolved.model,
+      modelOptions: resolved.options
+        ? { ...modelOptions, [input.selectedInstanceId]: resolved.options }
+        : modelOptions,
+    };
+  }
   return {
     selectedModel,
     modelOptions,
@@ -4248,6 +4277,9 @@ function useComposerDraftModelState(threadRef: ComposerThreadTarget): ComposerDr
       return draft
         ? {
             activeProvider: draft.activeProvider,
+            ...(draft.modelSelectionExplicit === undefined
+              ? {}
+              : { modelSelectionExplicit: draft.modelSelectionExplicit }),
             modelSelectionByProvider: draft.modelSelectionByProvider,
           }
         : EMPTY_COMPOSER_DRAFT_MODEL_STATE;

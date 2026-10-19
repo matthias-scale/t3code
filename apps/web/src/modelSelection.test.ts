@@ -920,3 +920,92 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
     );
   });
 });
+
+it("displays instance defaults in fresh drafts and dispatches required native options unchanged", () => {
+  const instanceId = ProviderInstanceId.make("copilot_pool");
+  const driver = ProviderDriverKind.make("acpRegistry");
+  const settings = {
+    ...DEFAULT_UNIFIED_SETTINGS,
+    providerInstances: {
+      [instanceId]: {
+        driver,
+        newSessionDefaults: {
+          version: 1 as const,
+          model: "gpt-4.1",
+          options: [{ id: "allow_all", value: "on" }],
+        },
+      },
+    },
+  };
+  const providers = [provider({ provider: driver, instanceId, models: ["auto", "gpt-4.1"] })];
+  const input = {
+    draft: null,
+    providers,
+    selectedProvider: driver,
+    selectedInstanceId: instanceId,
+    threadModelSelection: null,
+    projectModelSelection: createModelSelection(instanceId, "auto"),
+    settings,
+  };
+  const resolved = deriveEffectiveComposerModelState(input);
+  expect(resolved.selectedModel).toBe("gpt-4.1");
+  expect(
+    getComposerProviderState({
+      provider: driver,
+      model: resolved.selectedModel,
+      models: providers[0]!.models,
+      modelOptions: resolved.modelOptions?.[instanceId],
+      planModeEnabled: true,
+    }).modelOptionsForDispatch,
+  ).toEqual([{ id: "allow_all", value: "on", required: true }]);
+  const explicit = {
+    activeProvider: instanceId,
+    modelSelectionExplicit: true,
+    modelSelectionByProvider: { [instanceId]: createModelSelection(instanceId, "auto") },
+  };
+  expect(deriveEffectiveComposerModelState({ ...input, draft: explicit }).selectedModel).toBe(
+    "auto",
+  );
+  expect(
+    deriveEffectiveComposerModelState({
+      ...input,
+      threadModelSelection: explicit.modelSelectionByProvider[instanceId],
+    }).selectedModel,
+  ).toBe("auto");
+});
+
+it("keeps explicit empty native options in a fresh web draft", () => {
+  const instanceId = ProviderInstanceId.make("copilot_pool");
+  const driver = ProviderDriverKind.make("acpRegistry");
+  const explicit = createModelSelection(instanceId, "gpt-4.1", []);
+  const resolved = deriveEffectiveComposerModelState({
+    draft: {
+      activeProvider: instanceId,
+      modelSelectionExplicit: true,
+      modelSelectionByProvider: { [instanceId]: explicit },
+    },
+    providers: [provider({ provider: driver, instanceId, models: ["gpt-4.1"] })],
+    selectedProvider: driver,
+    selectedInstanceId: instanceId,
+    threadModelSelection: null,
+    projectModelSelection: null,
+    settings: {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver,
+          newSessionDefaults: {
+            version: 1,
+            model: "gpt-4.1",
+            options: [{ id: "allow_all", value: "on" }],
+          },
+        },
+      },
+    },
+  });
+  expect(resolved.modelOptions?.[instanceId]).toEqual([]);
+  expect(
+    createModelSelection(instanceId, resolved.selectedModel, resolved.modelOptions?.[instanceId])
+      .options,
+  ).toEqual([]);
+});

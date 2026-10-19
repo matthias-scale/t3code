@@ -10,6 +10,7 @@ import {
 } from "./providerInstance.ts";
 
 const decodeProviderDriverKind = Schema.decodeUnknownSync(ProviderDriverKind);
+const encodeProviderInstanceConfig = Schema.encodeSync(ProviderInstanceConfig);
 const decodeProviderInstanceId = Schema.decodeUnknownSync(ProviderInstanceId);
 const decodeProviderInstanceRef = Schema.decodeUnknownSync(ProviderInstanceRef);
 const decodeProviderInstanceConfig = Schema.decodeUnknownSync(ProviderInstanceConfig);
@@ -203,4 +204,50 @@ describe("ProviderInstanceConfigMap", () => {
       }),
     ).toThrow();
   });
+});
+
+it("round-trips versioned instance new-session defaults and rejects ambiguous native ids", () => {
+  const input = {
+    driver: "acpRegistry",
+    newSessionDefaults: {
+      version: 1,
+      model: "gpt-4.1",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      options: [{ id: "allow_all", value: "on" }],
+    },
+  };
+  const decoded = decodeProviderInstanceConfig(input);
+  expect(encodeProviderInstanceConfig(decoded)).toEqual(input);
+  expect(() =>
+    decodeProviderInstanceConfig({
+      ...input,
+      newSessionDefaults: { ...input.newSessionDefaults, version: 2 },
+    }),
+  ).toThrow();
+  expect(() =>
+    decodeProviderInstanceConfig({
+      ...input,
+      newSessionDefaults: {
+        ...input.newSessionDefaults,
+        options: [
+          { id: "mode", value: "ask" },
+          { id: "mode", value: "autopilot" },
+        ],
+      },
+    }),
+  ).toThrow();
+});
+
+it("rejects native defaults on adapters without strict native-option support", () => {
+  expect(() =>
+    decodeProviderInstanceConfig({
+      driver: "codex",
+      newSessionDefaults: {
+        version: 1,
+        model: "gpt-5.4",
+        options: [{ id: "effort", value: "high" }],
+      },
+    }),
+  ).toThrow();
 });
