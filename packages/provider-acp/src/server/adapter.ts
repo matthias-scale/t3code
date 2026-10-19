@@ -5961,17 +5961,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           const effectiveModeState = yield* runtime.getModeState;
           const effectiveConfigOptions = yield* runtime.getConfigOptions;
-          for (const selection of optionSelections.filter((option) => option.required)) {
-            const acknowledged =
-              selection.id === ACP_SESSION_MODE_OPTION_ID && !hasNativeConfigWithSyntheticModeId
-                ? effectiveModeState?.currentModeId === selection.value
-                : effectiveConfigOptions.find((option) => option.id === selection.id)
-                    ?.currentValue === selection.value;
-            if (!acknowledged)
-              return yield* EffectAcpErrors.AcpRequestError.internalError(
-                "The provider did not acknowledge a required native session default. Check the provider's new-session defaults.",
-              );
-          }
           const planSensitiveOptions = effectiveConfigOptions.filter(
             (
               option,
@@ -6037,6 +6026,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
               nativeBuildConfigurationBySessionId.delete(startResult.sessionId);
             }
+          }
+          const finalModeState = yield* runtime.getModeState;
+          const finalConfigOptions = yield* runtime.getConfigOptions;
+          for (const selection of optionSelections.filter((option) => option.required)) {
+            const acknowledged =
+              selection.id === ACP_SESSION_MODE_OPTION_ID && !hasNativeConfigWithSyntheticModeId
+                ? finalModeState?.currentModeId === selection.value
+                : finalConfigOptions.find((option) => option.id === selection.id)?.currentValue ===
+                  selection.value;
+            if (!acknowledged)
+              return yield* EffectAcpErrors.AcpRequestError.internalError(
+                "The provider did not acknowledge a required native session default. Check the provider's new-session defaults.",
+              );
           }
           yield* (
             flavor.onSessionConfigurationUpdate?.(

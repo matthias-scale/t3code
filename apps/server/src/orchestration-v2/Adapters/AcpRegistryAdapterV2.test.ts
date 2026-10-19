@@ -166,6 +166,7 @@ describe("AcpRegistryAdapterV2", () => {
       readonly optionId?: string;
       readonly required?: boolean;
       readonly expectFailure?: boolean;
+      readonly interactionMode?: "default" | "plan";
     }) {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -230,7 +231,7 @@ describe("AcpRegistryAdapterV2", () => {
           },
           runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
             runtimeMode: "approval-required",
-            interactionMode: "default",
+            interactionMode: input.interactionMode ?? "default",
             cwd: replayDir,
           }),
         })
@@ -238,6 +239,55 @@ describe("AcpRegistryAdapterV2", () => {
       assert.equal(result._tag, input.expectFailure ? "Failure" : "Success");
       yield* makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript);
     });
+
+    it.effect("rejects a required native mode overwritten by plan interaction", () =>
+      openWithStoredModePick({
+        setup: {
+          modes: {
+            currentModeId: "default",
+            availableModes: ["default", "autopilot", "plan"].map((id) => ({ id, name: id })),
+          },
+        },
+        modeFrames: [
+          outbound("session/set_mode"),
+          answer("session/set_mode", {}),
+          outbound("session/set_mode"),
+          answer("session/set_mode", {}),
+        ],
+        storedModePick: "autopilot",
+        required: true,
+        interactionMode: "plan",
+        expectFailure: true,
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    );
+
+    it.effect.each(["mode", "collaboration_mode"])(
+      "rejects a required %s option overwritten by plan interaction",
+      (category) => {
+        const option = (currentValue: string) => ({
+          id: "native-mode",
+          name: "Native mode",
+          category,
+          type: "select",
+          currentValue,
+          options: ["default", "autopilot", "plan"].map((value) => ({ value, name: value })),
+        });
+        return openWithStoredModePick({
+          setup: { configOptions: [option("default")] },
+          modeFrames: [
+            outbound("session/set_config_option"),
+            answer("session/set_config_option", { configOptions: [option("autopilot")] }),
+            outbound("session/set_config_option"),
+            answer("session/set_config_option", { configOptions: [option("plan")] }),
+          ],
+          storedModePick: "autopilot",
+          optionId: "native-mode",
+          required: true,
+          interactionMode: "plan",
+          expectFailure: true,
+        }).pipe(Effect.provide(layerTest), Effect.scoped);
+      },
+    );
 
     it.effect("fails before prompting when a required default is absent", () =>
       openWithStoredModePick({
