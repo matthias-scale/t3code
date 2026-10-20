@@ -2833,7 +2833,9 @@ it.effect(
       assert.isUndefined((release.mac as Record<string, unknown>).identity);
       assert.match((release.mac as Record<string, unknown>).sign as string, /sign-macos\.ts$/);
       const fs = yield* FileSystem.FileSystem;
-      const entitlements = yield* fs.readFileString(String(mac.entitlements));
+      const entitlements = yield* fs.readFileString(
+        NodePath.resolve(import.meta.dirname, "..", String(mac.entitlements)),
+      );
       assert.include(entitlements, "com.apple.security.cs.disable-library-validation");
       assert.notInclude(entitlements, "keychain-access-groups");
       assert.notInclude(entitlements, "com.apple.developer.team-identifier");
