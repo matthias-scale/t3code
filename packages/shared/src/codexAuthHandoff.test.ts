@@ -77,3 +77,25 @@ describe("Codex desktop handoff", () => {
     expect(() => codexAuthDeliveryUrl(input, callbackUrl + "&state=another")).toThrow();
   });
 });
+
+it.each([false, true])(
+  "routes only the exact fork handoff scheme (development=%s)",
+  (development) => {
+    const handoff = codexAuthHandoffUrl(input, development);
+    const scheme = development ? "t3code-attention-dev:" : "t3code-attention:";
+    expect(new URL(handoff).protocol).toBe(scheme);
+    expect(readCodexAuthHandoff(handoff, development)).toEqual(input);
+    expect(readCodexAuthHandoff(handoff, !development)).toBeUndefined();
+    for (const rejected of ["t3code:", "t3code-dev:", "t3code-attention-evil:"]) {
+      expect(readCodexAuthHandoff(handoff.replace(scheme, rejected), development)).toBeUndefined();
+    }
+    const desktopInput = {
+      ...input,
+      returnUrl: `${scheme}//app/welcome#agents:remote-environment`,
+    };
+    expect(
+      readCodexAuthHandoff(codexAuthHandoffUrl(desktopInput, development), development),
+    ).toEqual(desktopInput);
+    expect(new URL(codexAuthDeliveryUrl(desktopInput, callbackUrl)).protocol).toBe(scheme);
+  },
+);

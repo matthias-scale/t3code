@@ -62,7 +62,11 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+import {
+  DESKTOP_APP_ID,
+  DESKTOP_PRODUCT_NAME,
+  DESKTOP_SCHEME,
+} from "@t3tools/shared/desktopIdentity";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -187,6 +191,7 @@ interface BuildCliInput {
   readonly skipBuild: Option.Option<boolean>;
   readonly keepStage: Option.Option<boolean>;
   readonly signed: Option.Option<boolean>;
+  readonly localAdHoc?: Option.Option<boolean>;
   readonly verbose: Option.Option<boolean>;
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
@@ -208,6 +213,15 @@ const getDefaultArch = Effect.fn("getDefaultArch")(function* (platform: typeof B
 
   return yield* getDefaultBuildArch(platform, config);
 });
+
+export class LocalAdHocSigningOptionsError extends Schema.TaggedError<LocalAdHocSigningOptionsError>()(
+  "LocalAdHocSigningOptionsError",
+  {},
+) {
+  override get message() {
+    return "--local-ad-hoc requires macOS packaging and cannot be combined with --signed.";
+  }
+}
 
 export class MacPasskeySigningConfigurationResolutionError extends Schema.TaggedError<MacPasskeySigningConfigurationResolutionError>()(
   "MacPasskeySigningConfigurationResolutionError",
@@ -953,6 +967,7 @@ interface ResolvedBuildOptions {
   readonly skipBuild: boolean;
   readonly keepStage: boolean;
   readonly signed: boolean;
+  readonly localAdHoc: boolean;
   readonly verbose: boolean;
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
@@ -1758,6 +1773,10 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const skipBuild = resolveBooleanFlag(input.skipBuild, env.skipBuild);
   const keepStage = resolveBooleanFlag(input.keepStage, env.keepStage);
   const signed = resolveBooleanFlag(input.signed, env.signed);
+  const localAdHoc = Option.getOrElse(input.localAdHoc ?? Option.none(), () => false);
+  if (localAdHoc && (signed || platform !== "mac")) {
+    return yield* new LocalAdHocSigningOptionsError();
+  }
   const verbose = resolveBooleanFlag(input.verbose, env.verbose);
 
   const mockUpdates = resolveBooleanFlag(input.mockUpdates, env.mockUpdates);
@@ -1784,6 +1803,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     skipBuild,
     keepStage,
     signed,
+    localAdHoc,
     verbose,
     mockUpdates,
     mockUpdateServerPort,
@@ -2806,10 +2826,8 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
-  return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+export function resolveDesktopProductName(_version: string): string {
+  return DESKTOP_PRODUCT_NAME;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2817,8 +2835,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   target: string,
   version: string,
   signed: boolean,
-  mockUpdates: boolean,
-  mockUpdateServerPort: number | undefined,
+  _mockUpdates: boolean,
+  _mockUpdateServerPort: number | undefined,
   macPasskeySigning:
     | {
         readonly entitlementsPath: string;
@@ -2827,7 +2845,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  localAdHoc = false,
 ) {
+  if (localAdHoc && (signed || platform !== "mac" || macPasskeySigning)) {
+    return yield* new LocalAdHocSigningOptionsError();
+  }
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
@@ -2859,23 +2881,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  // A missing `publish` makes electron-builder infer a GitHub feed from
-  // GH_TOKEN/GITHUB_TOKEN. The staged app has no repository to resolve it
-  // against, so writing update manifests then crashes on a null config.
+  // Never infer upstream feeds: this fork must not update back into the original app.
   buildConfig.publish = null;
-  if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
-    if (publishConfig) {
-      buildConfig.publish = [publishConfig];
-    } else if (mockUpdates) {
-      buildConfig.publish = [
-        {
-          provider: "generic",
-          url: resolveMockUpdateServerUrl(mockUpdateServerPort),
-        },
-      ];
-    }
-  }
 
   if (platform === "mac") {
     const path = yield* Path.Path;
@@ -2895,28 +2902,17 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           "T3 Code lets commands run by terminals and coding agents use the camera.",
         NSMicrophoneUsageDescription:
           "T3 Code lets commands run by terminals and coding agents use the microphone.",
-        // macOS lists an app under Default web browser only when it opens web
-        // pages as documents as well as http and https links (see protocols).
-        CFBundleDocumentTypes: [
-          {
-            CFBundleTypeName: "Web page",
-            CFBundleTypeRole: "Viewer",
-            LSHandlerRank: "Alternate",
-            LSItemContentTypes: ["public.html", "public.xhtml"],
-          },
-        ],
       },
-      protocols: [
-        {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
-        },
-        {
-          name: "Web site URL",
-          schemes: ["http", "https"],
-          role: "Viewer",
-        },
-      ],
+      protocols: [{ name: DESKTOP_PRODUCT_NAME, schemes: [DESKTOP_SCHEME] }],
+      ...(localAdHoc
+        ? {
+            identity: "-",
+            notarize: false,
+            hardenedRuntime: true,
+            entitlements: "apps/desktop/resources/entitlements.local.mac.plist",
+            entitlementsInherit: "apps/desktop/resources/entitlements.local.mac.plist",
+          }
+        : {}),
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
       ...(macPasskeySigning
         ? {
@@ -2965,8 +2961,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       maintainer: "T3 Tools <hello@t3.codes>",
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: DESKTOP_PRODUCT_NAME,
+          schemes: [DESKTOP_SCHEME],
         },
       ],
       desktop: {
@@ -3904,6 +3900,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.localAdHoc,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -4139,6 +4136,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   keepStage: Flag.Boolean("keep-stage").pipe(
     Flag.withDescription("Keep temporary staging files (env: T3CODE_DESKTOP_KEEP_STAGE)."),
+    Flag.optional,
+  ),
+  localAdHoc: Flag.Boolean("local-ad-hoc").pipe(
+    Flag.withDescription(
+      "Sign a local macOS app ad-hoc; no notarization or distribution identity. Incompatible with --signed.",
+    ),
     Flag.optional,
   ),
   signed: Flag.Boolean("signed").pipe(

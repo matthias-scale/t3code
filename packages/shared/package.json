@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./desktopIdentity": {
+      "types": "./src/desktopIdentity.ts",
+      "import": "./src/desktopIdentity.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

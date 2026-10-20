@@ -1,3 +1,4 @@
+import { DESKTOP_RUNTIME_NAME } from "@t3tools/shared/desktopIdentity";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,10 +24,7 @@ const decodeAppPackageMetadata = Schema.decodeEffect(Schema.fromJsonString(AppPa
 export class DesktopAppIdentity extends Context.Service<
   DesktopAppIdentity,
   {
-    readonly resolveUserDataPath: Effect.Effect<
-      string,
-      DesktopUserData.DesktopUserDataInitializationError
-    >;
+    readonly resolveUserDataPath: Effect.Effect<string>;
     readonly configure: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/app/DesktopAppIdentity") {}
@@ -94,9 +92,7 @@ export const make = Effect.gen(function* () {
     // Electron removes spaces from this name to build the native User-Agent
     // product token, but leaves parentheses intact. Keep the runtime name valid
     // without rewriting preview sessions (which breaks Turnstile, #7110).
-    yield* electronApp.setName(
-      `${environment.branding.baseName} ${environment.branding.stageLabel}`,
-    );
+    yield* electronApp.setName(DESKTOP_RUNTIME_NAME);
     yield* electronApp.setAboutPanelOptions({
       applicationName: environment.displayName,
       applicationVersion: environment.appVersion,

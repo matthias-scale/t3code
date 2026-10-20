@@ -1,10 +1,12 @@
 import * as NodePath from "@effect/platform-node/NodePath";
+import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import { launcherPath } from "./DesktopCliShim.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 
@@ -76,7 +78,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.serverRoot, "/repo");
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
-      assert.equal(environment.appUserModelId, "com.t3tools.t3code.dev");
+      assert.equal(environment.appUserModelId, "com.matthias-scale.t3code.attention.dev");
       assert.equal(environment.linuxWmClass, "t3code-dev");
       assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.Development.desktop");
       assert.deepEqual(
@@ -162,8 +164,8 @@ describe("DesktopEnvironment", () => {
       );
       const production = yield* makeEnvironment();
 
-      assert.equal(development.stateDir, "/Users/alice/.t3/dev");
-      assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
+      assert.equal(development.stateDir, "/Users/alice/.t3-attention/dev");
+      assert.equal(production.stateDir, "/Users/alice/.t3-attention/userdata");
     }),
   );
 
@@ -201,3 +203,34 @@ describe("DesktopEnvironment", () => {
     }),
   );
 });
+
+it.effect(
+  "Finder launch isolates backend, CLI home and app-control socket; explicit home still wins",
+  () =>
+    Effect.gen(function* () {
+      const fork = yield* makeEnvironment({ isPackaged: true });
+      assert.equal(fork.displayName, "T3 Code (Attention)");
+      assert.equal(fork.baseDir, "/Users/alice/.t3-attention");
+      assert.equal(launcherPath(fork), "/Users/alice/.t3-attention/bin/t3");
+      assert.equal(fork.stateDir, "/Users/alice/.t3-attention/userdata");
+      assert.equal(
+        fork.backendEntryPath,
+        "/Applications/T3 Code.app/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
+      );
+      const address = (stateDir: string) =>
+        resolveDesktopAppControlAddress({
+          stateDir,
+          platform: "darwin",
+          tempDir: "/tmp",
+          userId: 501,
+          joinPath: (...parts) => parts.join("/"),
+        }).address;
+      assert.notEqual(address(fork.stateDir), address("/Users/alice/.t3/userdata"));
+      const custom = yield* makeEnvironment(
+        { isPackaged: true },
+        { T3CODE_HOME: " /custom/attention " },
+      );
+      assert.equal(custom.baseDir, "/custom/attention");
+      assert.equal(custom.stateDir, "/custom/attention/userdata");
+    }),
+);

@@ -118,9 +118,15 @@ describe("link round trips", () => {
   });
 
   it("hands an in-app path to the installed app", () => {
-    expect(promptLinkDeepLink("/new?prompt=hi")).toBe("t3code://new?prompt=hi");
+    expect(promptLinkDeepLink("/new?prompt=hi")).toBe("t3code-attention://new?prompt=hi");
     expect(promptLinkDeepLink("/env-1/thread-1?prompt=hi")).toBe(
-      "t3code://threads/env-1/thread-1?prompt=hi",
+      "t3code-attention://threads/env-1/thread-1?prompt=hi",
     );
   });
+});
+
+it("routes generated fork development links back into the same app", () => {
+  const link = promptLinkDeepLink("/new?prompt=hi", "t3code-attention-dev");
+  expect(new URL(link).protocol).toBe("t3code-attention-dev:");
+  expect(promptLinkAppPath(link)).toBe("/new?prompt=hi");
 });
