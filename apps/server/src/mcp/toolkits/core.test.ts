@@ -13,6 +13,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
@@ -1007,4 +1008,125 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
       ),
     ),
   ),
+);
+
+it.effect(
+  "app question tools derive their owner and refuse stale, external, and read-only callers",
+  () => {
+    const calls: Array<{ readonly operation: string; readonly input: unknown }> = [];
+    let active = true;
+    const ownedId = RuntimeRequestId.make("app-question:own");
+    const threadLayer = Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (id) =>
+        Effect.sync(() =>
+          McpToolAccessTestkit.liveThreadShell(id, {
+            activeRunId: active ? RunId.make("run:mcp-test") : null,
+          }),
+        ),
+      createUserInputRequest: (input) =>
+        Effect.sync(() => {
+          calls.push({ operation: "create", input });
+          return { requestId: ownedId, status: "pending" as const, sequence: 1 };
+        }),
+      withdrawUserInputRequest: (input) =>
+        Effect.sync(() => {
+          calls.push({ operation: "withdraw", input });
+          return { requestId: input.requestId, status: "resolved" as const, sequence: 2 };
+        }),
+    });
+    return Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const call = (name: string, args: Record<string, unknown>, caller = scope) =>
+        server
+          .callTool({ name, arguments: args })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, caller),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const args = {
+        clientRequestId: "stable",
+        questions: [
+          {
+            id: "color",
+            header: "Color",
+            question: "Which color?",
+            options: [
+              { label: "Blue", description: "Ocean", value: "blue", preview: "unsupported" },
+            ],
+            multiSelect: true,
+            allowCustomAnswer: false,
+            initialAnswer: "blue",
+            required: false,
+          },
+        ],
+        threadId: "foreign-thread",
+        decision: "accept",
+        runtimeMode: "full-access",
+      };
+      const created = yield* call("t3_pending_request_create", args);
+      expect(created.isError).toBe(false);
+      expect(created.structuredContent).toMatchObject({ requestId: ownedId, status: "pending" });
+      expect(calls[0]).toMatchObject({
+        operation: "create",
+        input: {
+          threadId,
+          providerInstanceId: scope.thread!.providerInstanceId,
+          runId: RunId.make("run:mcp-test"),
+          clientRequestId: "stable",
+        },
+      });
+      expect(calls[0]!.input).toMatchObject({
+        questions: [
+          {
+            multiSelect: true,
+            allowCustomAnswer: false,
+            initialAnswer: "blue",
+            options: [{ value: "blue" }],
+          },
+        ],
+      });
+      expect(calls[0]!.input).not.toHaveProperty("questions.0.required");
+      expect(calls[0]!.input).not.toHaveProperty("questions.0.options.0.preview");
+      expect(calls[0]!.input).not.toHaveProperty("decision");
+      expect(calls[0]!.input).not.toHaveProperty("runtimeMode");
+      const withdrawn = yield* call("t3_pending_request_withdraw", {
+        requestId: ownedId,
+        threadId: "foreign-thread",
+        decision: "accept",
+      });
+      expect(withdrawn.isError).toBe(false);
+      expect(calls[1]).toMatchObject({
+        operation: "withdraw",
+        input: { threadId, requestId: ownedId },
+      });
+      expect(calls[1]!.input).not.toHaveProperty("decision");
+      for (const name of ["t3_pending_request_create", "t3_pending_request_withdraw"]) {
+        const params = name.endsWith("create") ? args : { requestId: ownedId };
+        const external = yield* call(name, params, {
+          ...scope,
+          thread: undefined,
+          client: { sessionId: "client", label: "client", access: "full-access" },
+        });
+        expect(declaredFailure(external)?.code).toBe("thread_credential_required");
+        const readOnly = yield* call(name, params, {
+          ...scope,
+          client: { sessionId: "client", label: "client", access: "read-only" },
+        });
+        expect(declaredFailure(readOnly)?.code).toBe("capability_denied");
+        active = false;
+        const stale = yield* call(name, params);
+        expect(declaredFailure(stale)?.code).toBe("parent_not_active");
+        active = true;
+      }
+      expect(calls).toHaveLength(2);
+    }).pipe(
+      Effect.provide(
+        layerThreadToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(threadLayer),
+        ),
+      ),
+    );
+  },
 );

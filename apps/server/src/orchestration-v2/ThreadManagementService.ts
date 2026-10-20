@@ -29,6 +29,8 @@ import {
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ProviderInstanceId,
+  RuntimeRequestId,
+  type OrchestrationV2UserInputQuestion,
   resolveProjectProviderInstanceEnabled,
   RunId,
   type ScheduledTaskId,
@@ -311,6 +313,37 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
 export interface ThreadManagementServiceShape {
+  readonly createUserInputRequest: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly clientRequestId: string;
+    readonly questions: readonly [
+      OrchestrationV2UserInputQuestion,
+      ...OrchestrationV2UserInputQuestion[],
+    ];
+  }) => Effect.Effect<
+    {
+      readonly requestId: RuntimeRequestId;
+      readonly status: "pending" | "resolved" | "expired" | "cancelled";
+      readonly sequence: number;
+    },
+    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
+  readonly withdrawUserInputRequest: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly requestId: RuntimeRequestId;
+  }) => Effect.Effect<
+    {
+      readonly requestId: RuntimeRequestId;
+      readonly status: "pending" | "resolved" | "expired" | "cancelled";
+      readonly sequence: number;
+    },
+    Orchestrator.OrchestratorV2Error | ThreadManagementProviderInstanceDisabledError
+  >;
+
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
@@ -674,6 +707,37 @@ const make = Effect.gen(function* () {
       Effect.andThen(assertDispatchTargetEnabled(command)),
       Effect.andThen(orchestrator.dispatch(command)),
     );
+
+  const createUserInputRequest: ThreadManagementServiceShape["createUserInputRequest"] = Effect.fn(
+    "ThreadManagementService.createUserInputRequest",
+  )(function* (input) {
+    const requestId = RuntimeRequestId.make(
+      `app-question:${encodeURIComponent(input.threadId)}:${encodeURIComponent(input.clientRequestId)}`,
+    );
+    const result = yield* dispatch({
+      type: "user_input_request.record",
+      commandId: input.commandId,
+      threadId: input.threadId,
+      runId: input.runId,
+      providerInstanceId: input.providerInstanceId,
+      requestId,
+      questions: input.questions,
+    });
+    const { runtimeRequests } = yield* orchestrator.getThreadRecords(input.threadId, [
+      "runtimeRequests",
+    ]);
+    const request = runtimeRequests.find((request) => request.id === requestId)!;
+    return { requestId, status: request.status, sequence: result.sequence };
+  });
+  const withdrawUserInputRequest: ThreadManagementServiceShape["withdrawUserInputRequest"] =
+    Effect.fn("ThreadManagementService.withdrawUserInputRequest")(function* (input) {
+      const result = yield* dispatch({ type: "user_input_request.withdraw", ...input });
+      const { runtimeRequests } = yield* orchestrator.getThreadRecords(input.threadId, [
+        "runtimeRequests",
+      ]);
+      const request = runtimeRequests.find((request) => request.id === input.requestId)!;
+      return { requestId: input.requestId, status: request.status, sequence: result.sequence };
+    });
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(
@@ -1141,6 +1205,8 @@ const make = Effect.gen(function* () {
       ensureProjectionTranscript(input.threadId).pipe(
         Effect.andThen(orchestrator.searchThread(input)),
       ),
+    createUserInputRequest,
+    withdrawUserInputRequest,
     dispatch,
     getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
       ensureProjectionTranscript(threadId).pipe(

@@ -15,6 +15,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { PrimaryConnectionTarget } from "../connection/model.ts";
 import { v2Now, v2ShellSnapshot, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { applyShellStreamEvent } from "./shellReducer.ts";
+import { pendingSubagentRequestsByThread } from "./threadShell.ts";
 import { isThreadWorking } from "./threadInbox.ts";
 import { childThreadInputsTitle, createEnvironmentThreadShellAtoms } from "./threadShell.ts";
 
@@ -392,4 +393,30 @@ describe("v2 thread shell lists", () => {
       harness.registry.dispose();
     }
   });
+});
+
+it("propagates an app question through ancestors after the child run ends", () => {
+  const root = v2ThreadShell;
+  const child = {
+    ...root,
+    id: ThreadId.make("child:app-question"),
+    status: "completed" as const,
+    activityRunStatus: null,
+    lineage: {
+      ...root.lineage,
+      parentThreadId: root.id,
+      relationshipToParent: "subagent" as const,
+    },
+    pendingRuntimeRequest: {
+      id: RuntimeRequestId.make("app-question"),
+      kind: "user_input" as const,
+      createdAt: v2Now,
+      blocking: false,
+      origin: "app_question" as const,
+    },
+  };
+  expect(pendingSubagentRequestsByThread([root, child]).get(root.id)).toBe("user_input");
+  expect(
+    pendingSubagentRequestsByThread([root, { ...child, pendingRuntimeRequest: null }]).has(root.id),
+  ).toBe(false);
 });

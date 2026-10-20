@@ -11,6 +11,7 @@ import {
   ProviderInteractionMode,
   RuntimeRequestId,
   ProviderUserInputAnswers,
+  OrchestrationV2UserInputQuestion,
   IsoDateTime,
   OrchestratorMcpFailure,
   OrchestrationV2DispatchCommandResult,
@@ -148,6 +149,44 @@ const pendingRequest = Schema.Struct({
   requestId: RuntimeRequestId,
   questions: Schema.Array(question),
 });
+const appRequestResult = Schema.Struct({
+  requestId: RuntimeRequestId,
+  status: Schema.Literals(["pending", "resolved", "expired", "cancelled"]),
+  sequence: NonNegativeInt,
+});
+// App questions expose fields both clients can render and answer.
+const appQuestion = Schema.Struct({
+  id: OrchestrationV2UserInputQuestion.fields.id,
+  header: OrchestrationV2UserInputQuestion.fields.header,
+  question: OrchestrationV2UserInputQuestion.fields.question,
+  options: Schema.Array(
+    Schema.Struct({
+      label: TrimmedNonEmptyString,
+      description: TrimmedNonEmptyString,
+      value: Schema.optional(Schema.String),
+    }),
+  ),
+  multiSelect: OrchestrationV2UserInputQuestion.fields.multiSelect,
+  allowCustomAnswer: OrchestrationV2UserInputQuestion.fields.allowCustomAnswer,
+  initialAnswer: OrchestrationV2UserInputQuestion.fields.initialAnswer,
+});
+const PendingRequestCreateTool = Tool.make("t3_pending_request_create", {
+  ...commandTool,
+  description:
+    "Ask structured questions on your own thread and return immediately. Reuse clientRequestId when retrying the same questions. Continue independent work while pending; wait for answers before dependent work. Elapsed time never implies consent. Answers are delivered as messages and never grant permission or execution authority. Ordinary prose does not create a pending request.",
+  parameters: Schema.Struct({
+    clientRequestId: TrimmedNonEmptyString,
+    questions: Schema.NonEmptyArray(appQuestion),
+  }),
+  success: appRequestResult,
+}).annotate(Tool.Destructive, false);
+const PendingRequestWithdrawTool = Tool.make("t3_pending_request_withdraw", {
+  ...commandTool,
+  description:
+    "Withdraw an app-owned question on your own thread when its answer is no longer needed. Releases only its automatic pin when no app questions remain. This cannot dismiss native questions or approve permission requests.",
+  parameters: Schema.Struct({ requestId: RuntimeRequestId }),
+  success: appRequestResult,
+}).annotate(Tool.Destructive, true);
 const PendingRequestListTool = Tool.make("t3_pending_request_list", {
   ...commandTool,
   description:
@@ -279,6 +318,8 @@ export const ThreadToolkit = Toolkit.make(
   ThreadTransfersTool,
   ThreadConfigurationTool,
   ThreadConfigureTool,
+  PendingRequestCreateTool,
+  PendingRequestWithdrawTool,
   PendingRequestListTool,
   PendingRequestReadTool,
   PendingRequestRespondTool,

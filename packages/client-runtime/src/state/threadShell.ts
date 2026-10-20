@@ -31,8 +31,8 @@ const EMPTY_THREAD_REFS_BY_PROJECT: ReadonlyMap<
   ReadonlyArray<ScopedThreadRef>
 > = new Map();
 
-// An async question outlives the subagent's run, but once that run ends the
-// parent is no longer waiting on the answer, so it stops counting as input.
+// App-owned questions retain parent attention until answered or withdrawn.
+// Native requests keep their provider lifecycle rules.
 // The activity run stays set when a follow-up is queued behind a blocked run;
 // older servers omit it, so fall back to the latest run's status.
 const isChildRunLive = (
@@ -54,7 +54,7 @@ function subagentRequest(thread: OrchestrationV2ThreadShell): PendingSubagentReq
     kind === "auth_refresh" ||
     thread.lineage.relationshipToParent !== "subagent" ||
     isProviderNativeSubagentThread(thread) ||
-    !isChildRunLive(thread)
+    (!isChildRunLive(thread) && thread.pendingRuntimeRequest?.origin !== "app_question")
   ) {
     return null;
   }

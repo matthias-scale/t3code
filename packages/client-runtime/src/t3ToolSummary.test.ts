@@ -282,3 +282,18 @@ describe("summarizeT3ToolCalls", () => {
     });
   });
 });
+
+it("counts created and withdrawn question requests without counting retries twice", () => {
+  expect(
+    summarizeT3ToolCalls("question-create", [
+      completed({ clientRequestId: "stable" }, { requestId: "request-1" }),
+      completed({ clientRequestId: "stable" }, { requestId: "request-1" }),
+    ]).label,
+  ).toBe("Asked 1 pending question request");
+  expect(
+    summarizeT3ToolCalls("question-withdraw", [
+      completed({ requestId: "request-1" }),
+      completed({ requestId: "request-1" }),
+    ]).label,
+  ).toBe("Withdrew 1 pending question request");
+});

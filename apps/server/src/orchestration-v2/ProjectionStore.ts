@@ -1486,6 +1486,7 @@ function pendingRuntimeRequestSummary(
     kind: request.kind,
     createdAt: request.createdAt,
     blocking: request.responseCapability.type !== "message",
+    ...(request.origin === undefined ? {} : { origin: request.origin }),
   };
 }
 
