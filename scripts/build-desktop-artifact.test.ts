@@ -991,6 +991,27 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const macInfo = (mac.mac as { extendInfo: Record<string, unknown> }).extendInfo;
       assert.strictEqual(macInfo.NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac, true);
       assert.isUndefined(macInfo.CFBundleDocumentTypes);
+      assert.deepEqual(linux.extraMetadata, {
+        name: "t3code-attention",
+        desktopName: "com.matthias-scale.t3code.attention.desktop",
+      });
+      const linuxOptions = linux.linux as Record<string, unknown>;
+      assert.equal(linuxOptions.syncDesktopName, true);
+      assert.equal(linuxOptions.executableName, "t3code-attention");
+      assert.deepEqual(linuxOptions.desktop, { entry: { StartupWMClass: "t3code-attention" } });
+      const metainfo = yield* (yield* FileSystem.FileSystem).readFileString(
+        NodePath.resolve(
+          import.meta.dirname,
+          "../apps/desktop/resources/linux/com.matthias-scale.t3code.attention.metainfo.xml",
+        ),
+      );
+      assert.include(metainfo, "<id>com.matthias-scale.t3code.attention</id>");
+      assert.include(
+        metainfo,
+        '<launchable type="desktop-id">com.matthias-scale.t3code.attention.desktop</launchable>',
+      );
+      assert.include(metainfo, '<icon type="stock">t3code-attention</icon>');
+      assert.include(metainfo, "<binary>t3code-attention</binary>");
       assert.deepStrictEqual(linux.toolsets, { appimage: "1.0.3" });
       assert.notProperty(mac, "toolsets");
       assert.notProperty(win, "toolsets");

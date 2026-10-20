@@ -64,6 +64,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 import {
   DESKTOP_APP_ID,
+  DESKTOP_PROFILE_NAME,
+  desktopLinuxIdentity,
   DESKTOP_PRODUCT_NAME,
   DESKTOP_SCHEME,
 } from "@t3tools/shared/desktopIdentity";
@@ -2952,9 +2954,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     buildConfig.toolsets = { appimage: "1.0.3" };
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    const linuxIdentity = desktopLinuxIdentity(false);
+    buildConfig.extraMetadata = {
+      name: DESKTOP_PROFILE_NAME,
+      desktopName: linuxIdentity.desktopEntryName,
+    };
     buildConfig.linux = {
+      syncDesktopName: true,
       target: target === "AppImage" ? [target, "deb"] : [target],
-      executableName: "t3code",
+      executableName: DESKTOP_PROFILE_NAME,
       icon: "icons",
       category: "Development",
       synopsis: "Desktop GUI for coding agents",
@@ -2967,15 +2975,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: linuxIdentity.wmClass,
         },
       },
     };
     buildConfig.deb = {
       // FPM runs outside the staged app directory, so source paths must be absolute.
       fpm: [
-        `${path.join(repoRoot, "apps/desktop/resources/linux/com.t3tools.t3code.metainfo.xml")}=/usr/share/metainfo/com.t3tools.t3code.metainfo.xml`,
-        `${path.join(repoRoot, "LICENSE")}=/usr/share/doc/t3code/copyright`,
+        `${path.join(repoRoot, "apps/desktop/resources/linux/com.matthias-scale.t3code.attention.metainfo.xml")}=/usr/share/metainfo/com.matthias-scale.t3code.attention.metainfo.xml`,
+        `${path.join(repoRoot, "LICENSE")}=/usr/share/doc/${DESKTOP_PROFILE_NAME}/copyright`,
       ],
       // Debian 13 and Ubuntu 24.04 renamed some for 64-bit time; the old name
       // is the fallback for older releases.

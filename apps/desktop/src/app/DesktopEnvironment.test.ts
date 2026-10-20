@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import { resolveEarlyLinuxElectronOptions } from "./DesktopEarlyElectronStartup.ts";
 import { launcherPath } from "./DesktopCliShim.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -79,8 +80,11 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
       assert.equal(environment.appUserModelId, "com.matthias-scale.t3code.attention.dev");
-      assert.equal(environment.linuxWmClass, "t3code-dev");
-      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.Development.desktop");
+      assert.equal(environment.linuxWmClass, "t3code-attention-dev");
+      assert.equal(
+        environment.linuxDesktopEntryName,
+        "com.matthias-scale.t3code.attention.Development.desktop",
+      );
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),
@@ -143,6 +147,36 @@ describe("DesktopEnvironment", () => {
     }),
   );
 
+  it.effect.each([false, true])(
+    "keeps early and normal Linux identity consistent (dev=%s)",
+    (development) =>
+      Effect.gen(function* () {
+        const env = development ? { VITE_DEV_SERVER_URL: "http://localhost:5173" } : {};
+        const environment = yield* makeEnvironment(
+          { platform: "linux", isPackaged: !development },
+          env,
+        );
+        const early = resolveEarlyLinuxElectronOptions({
+          env,
+          homeDirectory: "/Users/alice",
+          joinPath: environment.path.join,
+          readFileString: () => "{}",
+        });
+        assert.equal(environment.linuxDesktopEntryName, early.linuxDesktopEntryName);
+        assert.equal(environment.linuxWmClass, early.linuxWmClass);
+        assert.equal(
+          environment.linuxDesktopEntryName,
+          development
+            ? "com.matthias-scale.t3code.attention.Development.desktop"
+            : "com.matthias-scale.t3code.attention.desktop",
+        );
+        assert.equal(
+          environment.linuxWmClass,
+          development ? "t3code-attention-dev" : "t3code-attention",
+        );
+      }),
+  );
+
   it.effect("uses the stable desktop entry as the packaged Linux portal identity", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({
@@ -152,7 +186,10 @@ describe("DesktopEnvironment", () => {
         resourcesPath: "/tmp/.mount_t3code/resources",
       });
 
-      assert.equal(environment.linuxDesktopEntryName, "com.t3tools.T3Code.desktop");
+      assert.equal(
+        environment.linuxDesktopEntryName,
+        "com.matthias-scale.t3code.attention.desktop",
+      );
     }),
   );
 

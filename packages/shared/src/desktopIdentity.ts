@@ -10,3 +10,14 @@ export const DESKTOP_DEV_SCHEME = "t3code-attention-dev";
 export function desktopScheme(development: boolean): string {
   return development ? DESKTOP_DEV_SCHEME : DESKTOP_SCHEME;
 }
+
+/** Linux launchers, window grouping and URL registration must share the fork identity. */
+export function desktopLinuxIdentity(development: boolean): {
+  readonly desktopEntryName: string;
+  readonly wmClass: string;
+} {
+  return {
+    desktopEntryName: `${DESKTOP_APP_ID}${development ? ".Development" : ""}.desktop`,
+    wmClass: `${DESKTOP_PROFILE_NAME}${development ? "-dev" : ""}`,
+  };
+}

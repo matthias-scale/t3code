@@ -202,51 +202,76 @@ describe("DesktopPreReadyPlatform", () => {
   });
 
   it.effect.each([
-    { previousEntry: undefined, label: "missing" },
-    { previousEntry: 'Exec="/Applications/deleted-previous.AppImage" %U', label: "stale" },
-  ])("prepares a $label Linux desktop entry before startup yields", ({ previousEntry }) => {
-    vi.stubEnv("VITE_DEV_SERVER_URL", "");
-    vi.stubEnv("XDG_DATA_HOME", "/xdg");
-    vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
-    getSwitchValueMock.mockReturnValue("");
-    let desktopName = "t3code.desktop";
-    let desktopEntry = previousEntry;
-    let iconInstalled = false;
-    copyFileSyncMock.mockImplementation((_source: string, destination: string) => {
-      iconInstalled = destination === "/xdg/icons/com.t3tools.T3Code.desktop.png";
-    });
-    setDesktopNameMock.mockImplementation((name: string) => {
-      desktopName = name;
-    });
-    writeFileSyncMock.mockImplementation((path: string, contents: string) => {
-      if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
-    });
+    { previousEntry: undefined, label: "missing", development: false },
+    {
+      previousEntry: 'Exec="/Applications/deleted-previous.AppImage" %U',
+      label: "stale",
+      development: false,
+    },
+    { previousEntry: undefined, label: "development", development: true },
+  ])(
+    "prepares a $label Linux desktop entry before startup yields",
+    ({ previousEntry, development }) => {
+      const entryName = development
+        ? "com.matthias-scale.t3code.attention.Development.desktop"
+        : "com.matthias-scale.t3code.attention.desktop";
+      vi.stubEnv("VITE_DEV_SERVER_URL", development ? "http://localhost:5173" : "");
+      vi.stubEnv("XDG_DATA_HOME", "/xdg");
+      vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
+      getSwitchValueMock.mockReturnValue("");
+      let desktopName = "t3code.desktop";
+      let desktopEntry = previousEntry;
+      const originalFiles = new Map([
+        ["/xdg/applications/com.t3tools.T3Code.desktop", "original launcher"],
+        ["/xdg/icons/com.t3tools.T3Code.desktop.png", "original icon"],
+        ["/xdg/applications/com.t3tools.T3Code.Development.desktop", "original dev launcher"],
+        ["/xdg/icons/com.t3tools.T3Code.Development.desktop.png", "original dev icon"],
+      ]);
+      const files = new Map(originalFiles);
+      let iconInstalled = false;
+      copyFileSyncMock.mockImplementation((_source: string, destination: string) => {
+        files.set(destination, "fork icon");
+        iconInstalled = destination === `/xdg/icons/${entryName}.png`;
+      });
+      setDesktopNameMock.mockImplementation((name: string) => {
+        desktopName = name;
+      });
+      writeFileSyncMock.mockImplementation((path: string, contents: string) => {
+        files.set(path, contents);
+        if (path === `/xdg/applications/${entryName}`) desktopEntry = contents;
+      });
 
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const portalIdentity = Promise.resolve().then(() => ({
-          desktopName,
-          desktopEntry,
-          iconInstalled,
-        }));
-        yield* Layer.build(
-          DesktopPreReadyPlatform.layer.pipe(
-            Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
-          ),
-        );
-        const identity = yield* Effect.promise(() => portalIdentity);
-        assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
-        assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
-        assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Attention)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code-attention;");
-        assert.include(
-          identity.desktopEntry ?? "",
-          "Icon=/xdg/icons/com.t3tools.T3Code.desktop.png",
-        );
-        assert.isTrue(identity.iconInstalled);
-      }),
-    ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
-  });
+      return Effect.scoped(
+        Effect.gen(function* () {
+          const portalIdentity = Promise.resolve().then(() => ({
+            desktopName,
+            desktopEntry,
+            iconInstalled,
+          }));
+          yield* Layer.build(
+            DesktopPreReadyPlatform.layer.pipe(
+              Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
+            ),
+          );
+          const identity = yield* Effect.promise(() => portalIdentity);
+          assert.equal(identity.desktopName, entryName);
+          assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
+          assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Attention)");
+          assert.include(
+            identity.desktopEntry ?? "",
+            `MimeType=x-scheme-handler/t3code-attention${development ? "-dev" : ""};`,
+          );
+          assert.include(identity.desktopEntry ?? "", `Icon=/xdg/icons/${entryName}.png`);
+          assert.isTrue(identity.iconInstalled);
+          for (const [path, contents] of originalFiles) assert.equal(files.get(path), contents);
+          assert.deepInclude(appendSwitchMock.mock.calls, [
+            "class",
+            development ? "t3code-attention-dev" : "t3code-attention",
+          ]);
+        }),
+      ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
+    },
+  );
 
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {
     getSwitchValueMock.mockReturnValue("");
