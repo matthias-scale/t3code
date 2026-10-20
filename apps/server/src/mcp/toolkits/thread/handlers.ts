@@ -75,6 +75,42 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_pending_request_create: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const { scope, threads, caller } = yield* readCaller();
+      if (caller?.activeRunId == null || scope.thread === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "parent_not_active",
+          message: "This tool needs an active run on the calling thread.",
+        });
+      return yield* threads
+        .createUserInputRequest({
+          ...input,
+          threadId: caller.id,
+          runId: caller.activeRunId,
+          providerInstanceId: scope.thread.providerInstanceId,
+          commandId: yield* newCommandId(),
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+    }),
+  ),
+  t3_pending_request_withdraw: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const { scope, threads } = yield* readCaller();
+      if (scope.thread === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "thread_credential_required",
+          message: "This tool needs a calling thread.",
+        });
+      return yield* threads
+        .withdrawUserInputRequest({
+          ...input,
+          threadId: scope.thread.threadId,
+          commandId: yield* newCommandId(),
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

@@ -23,9 +23,10 @@ import {
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   MessageId,
-  type NodeId,
+  NodeId,
   type ModelSelection,
   OrchestrationV2Command,
+  OrchestrationV2UserInputQuestion,
   type OrchestrationV2InternalCommand,
   type OrchestrationV2LimitRecoveryUpdate,
   type OrchestrationV2ServerCommand,
@@ -61,7 +62,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
-  type TurnItemId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -437,6 +438,8 @@ function isGoalCommand(message: {
   return message.attachments.length === 0 && /^\/goal(?:\s|$)/u.test(message.text.trim());
 }
 
+const appQuestionsEqual = Schema.toEquivalence(Schema.Array(OrchestrationV2UserInputQuestion));
+
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
@@ -496,6 +499,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.completion-delivery.dispose":
     case "thread.created.record":
       return command.parentThreadId;
+    case "user_input_request.withdraw":
+    case "user_input_request.record":
     case "secret_request.record":
       return command.threadId;
     case "thread.fork":
@@ -3044,6 +3049,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             pullRequests: thread.pullRequests?.map((link) => withPullRequestWatch(link, undefined)),
             unsettledAt: null,
             pinnedAt: null,
+            questionPinOwned: false,
             pinOrderKey: null,
             activeOrderKey: null,
             snoozedUntil: null,
@@ -3100,6 +3106,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             pinnedAt: alreadyPinned ? thread.pinnedAt : now,
+            questionPinOwned: false,
             ...(alreadyPinned || command.orderKey === undefined
               ? {}
               : { pinOrderKey: command.orderKey }),
@@ -3117,6 +3124,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return {
             ...thread,
             pinnedAt: null,
+            questionPinOwned: false,
             pinOrderKey: null,
             updatedAt: alreadyUnpinned ? thread.updatedAt : now,
           };
@@ -7519,6 +7527,156 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchAppQuestionRecord = Effect.fn("Orchestrator.dispatchAppQuestionRecord")(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "user_input_request.record" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* projectionStore
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "runtimeRequests", "turnItems", "providerTurns", "attempts"],
+        { turnItemTypes: ["user_input_request"], messageRoles: [] },
+      )
+      .pipe(mapDispatchError(command));
+    const run = projection.runs.find((run) => run.id === command.runId);
+    if (
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null ||
+      run === undefined ||
+      run.rootNodeId === null ||
+      run.providerInstanceId !== command.providerInstanceId ||
+      (run.status !== "starting" && run.status !== "running" && run.status !== "waiting")
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "The caller no longer owns an active run on this thread.",
+      });
+    }
+    if (
+      new Set(command.questions.map((question) => question.id)).size !== command.questions.length
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Question IDs must be unique within a request.",
+      });
+    }
+    const existing = projection.runtimeRequests.find((request) => request.id === command.requestId);
+    if (existing !== undefined) {
+      const item = projection.turnItems.find(
+        (item) => item.type === "user_input_request" && item.requestId === command.requestId,
+      );
+      if (
+        existing.origin !== "app_question" ||
+        item?.type !== "user_input_request" ||
+        !appQuestionsEqual(item.questions, command.questions)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "clientRequestId already belongs to different questions.",
+        });
+      }
+      return;
+    }
+    const now = yield* DateTime.now;
+    const nodeId = NodeId.make(`app-question-node:${command.requestId}`);
+    const providerTurnId = providerTurnForRun(projection, run)?.id ?? null;
+    const emitEvent = emit(events, command);
+    const common = {
+      threadId: command.threadId,
+      runId: run.id,
+      nodeId,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+    };
+    yield* emitEvent({
+      ...common,
+      type: "node.updated",
+      payload: {
+        id: nodeId,
+        threadId: command.threadId,
+        runId: run.id,
+        parentNodeId: run.rootNodeId,
+        rootNodeId: run.rootNodeId,
+        kind: "user_input_request",
+        status: "waiting",
+        countsForRun: false,
+        providerThreadId: run.providerThreadId,
+        providerTurnId,
+        nativeItemRef: null,
+        runtimeRequestId: command.requestId,
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+    yield* emitEvent({
+      ...common,
+      type: "runtime-request.updated",
+      payload: {
+        id: command.requestId,
+        nodeId,
+        providerTurnId,
+        nativeRequestRef: null,
+        origin: "app_question",
+        kind: "user_input",
+        status: "pending",
+        responseCapability: { type: "message" },
+        createdAt: now,
+        resolvedAt: null,
+      },
+    });
+    yield* emitEvent({
+      ...common,
+      type: "turn-item.updated",
+      payload: {
+        id: TurnItemId.make(`app-question-item:${command.requestId}`),
+        threadId: command.threadId,
+        runId: run.id,
+        nodeId,
+        providerThreadId: run.providerThreadId,
+        providerTurnId,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal(projection),
+        status: "waiting",
+        title: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "user_input_request",
+        requestId: command.requestId,
+        questions: command.questions,
+        responseMode: "message",
+      },
+    });
+    if (projection.thread.pinnedAt == null) {
+      yield* emitEvent({
+        type: "thread.pinned",
+        threadId: command.threadId,
+        occurredAt: now,
+        payload: {
+          ...projection.thread,
+          pinnedAt: now,
+          questionPinOwned: true,
+          settledOverride:
+            projection.thread.settledOverride === "settled"
+              ? "active"
+              : projection.thread.settledOverride,
+          settledAt: null,
+          snoozedAt: null,
+          snoozedUntil: null,
+          updatedAt: now,
+        },
+      });
+    }
+  });
+
   const dispatchSecretRequestRecord = Effect.fn("orchestrationV2.dispatch.secretRequestRecord")(
     function* (
       command: Extract<OrchestrationV2InternalCommand, { readonly type: "secret_request.record" }>,
@@ -7747,6 +7905,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         });
       }
+      if (runtimeRequest.origin === "app_question") {
+        const { thread, runtimeRequests } = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runtimeRequests"])
+          .pipe(mapDispatchError(command));
+        const resolvedIds = new Set(
+          (yield* Ref.get(events)).flatMap((event) =>
+            event.type === "runtime-request.updated" && event.payload.status !== "pending"
+              ? [event.payload.id]
+              : [],
+          ),
+        );
+        if (
+          thread.questionPinOwned &&
+          !runtimeRequests.some(
+            (request) =>
+              !resolvedIds.has(request.id) &&
+              request.origin === "app_question" &&
+              request.status === "pending",
+          )
+        ) {
+          yield* emitEvent({
+            type: "thread.unpinned",
+            threadId: command.threadId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              pinnedAt: null,
+              pinOrderKey: null,
+              questionPinOwned: false,
+              updatedAt: now,
+            },
+          });
+        }
+      }
       if (runtimeRequest.responseCapability.type === "message") {
         if (resolvedNodeStatus === "cancelled") return;
         if (approvalTurnItem?.type !== "user_input_request") {
@@ -7759,7 +7951,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const replies: string[] = [];
         for (const question of approvalTurnItem.questions) {
           const answer = answers?.[question.id];
-          if (typeof answer !== "string" || answer.trim().length === 0) {
+          const text = (
+            Array.isArray(answer) ? answer.join("\n") : typeof answer === "string" ? answer : ""
+          ).trim();
+          if (text.length === 0) {
             if (question.required === false) continue;
             return yield* new OrchestratorDispatchError({
               commandId: command.commandId,
@@ -7767,7 +7962,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               cause: "Answer each question before sending.",
             });
           }
-          replies.push(`${question.question}\n${answer.trim()}`);
+          replies.push(`${question.question}\n${text}`);
         }
         if (replies.length === 0) {
           return yield* new OrchestratorDispatchError({
@@ -11412,6 +11607,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.created.record":
         yield* dispatchCreatedThreadRecord(command, events);
         break;
+      case "user_input_request.withdraw": {
+        const request = yield* projectionStore
+          .getRuntimeRequest(command.threadId, command.requestId)
+          .pipe(mapDispatchError(command));
+        if (
+          request?.origin !== "app_question" ||
+          request.kind !== "user_input" ||
+          request.responseCapability.type !== "message"
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The app-owned question was not found on this thread.",
+          });
+        }
+        if (request.status === "pending")
+          yield* dispatchThreadUserInputDismiss(
+            { ...command, type: "thread.user-input.dismiss" },
+            events,
+            effects,
+          );
+        break;
+      }
+      case "user_input_request.record":
+        yield* dispatchAppQuestionRecord(command, events);
+        break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
         break;
@@ -11502,7 +11723,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         planned.events.length > 0 ||
         command.type === "thread.background-work.settle" ||
         command.type === "thread.stop" ||
-        command.type === "subagent.stop"
+        command.type === "subagent.stop" ||
+        command.type === "user_input_request.record" ||
+        command.type === "user_input_request.withdraw"
           ? Effect.succeed(planned)
           : Effect.fail(
               new OrchestratorDispatchError({

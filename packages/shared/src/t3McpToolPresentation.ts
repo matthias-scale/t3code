@@ -38,6 +38,8 @@ export type T3McpToolSummaryAction =
   | "queue-steer"
   | "question-list"
   | "question-read"
+  | "question-create"
+  | "question-withdraw"
   | "question-respond"
   | "secret-request"
   | "worktree-handoff"
@@ -284,6 +286,11 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "question-list",
   ),
   t3_pending_request_read: tool(["Read", "Reading", "Read", "pending questions"], "question-read"),
+  t3_pending_request_create: tool(["Ask", "Asking", "Asked", "a question"], "question-create"),
+  t3_pending_request_withdraw: tool(
+    ["Withdraw", "Withdrawing", "Withdrew", "a question"],
+    "question-withdraw",
+  ),
   t3_pending_request_respond: tool(
     ["Answer", "Answering", "Answered", "pending questions"],
     "question-respond",

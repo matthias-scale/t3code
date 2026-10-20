@@ -411,6 +411,7 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
+  questionPinOwned: Schema.optional(Schema.Boolean),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -1009,6 +1010,7 @@ export function latestProviderTurnForAttempt<
 }
 
 export const OrchestrationV2RuntimeRequest = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("app_question")),
   id: RuntimeRequestId,
   nodeId: NodeId,
   providerTurnId: Schema.NullOr(ProviderTurnId),
@@ -1785,6 +1787,7 @@ export const OrchestrationV2ShellThreadStatus = Schema.Union([
 export type OrchestrationV2ShellThreadStatus = typeof OrchestrationV2ShellThreadStatus.Type;
 
 export const OrchestrationV2PendingRuntimeRequestSummary = Schema.Struct({
+  origin: OrchestrationV2RuntimeRequest.fields.origin,
   id: RuntimeRequestId,
   kind: OrchestrationV2RuntimeRequest.fields.kind,
   createdAt: Schema.DateTimeUtc,
@@ -3048,6 +3051,21 @@ const OrchestrationV2InternalCommand = Schema.Union([
         }),
       }),
     ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("user_input_request.withdraw"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("user_input_request.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    providerInstanceId: ProviderInstanceId,
+    requestId: RuntimeRequestId,
+    questions: Schema.NonEmptyArray(OrchestrationV2UserInputQuestion),
   }),
   /**
    * Internal so no client can mark a request saved without the value being

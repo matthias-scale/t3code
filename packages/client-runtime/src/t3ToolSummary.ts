@@ -282,6 +282,20 @@ export function summarizeT3ToolCalls(
         quantity(countEntities(entityIds("requestId")), "pending question request"),
       );
       break;
+    case "question-create":
+      label = phrase(
+        "Asked",
+        "ask",
+        quantity(countEntities(entityIds("requestId")), "pending question request"),
+      );
+      break;
+    case "question-withdraw":
+      label = phrase(
+        "Withdrew",
+        "withdraw",
+        quantity(countEntities(entityIds("requestId")), "pending question request"),
+      );
+      break;
     case "question-respond":
       label = phrase(
         "Answered",
