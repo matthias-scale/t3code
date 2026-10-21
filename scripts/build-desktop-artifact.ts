@@ -2911,8 +2911,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
             identity: "-",
             notarize: false,
             hardenedRuntime: true,
-            entitlements: "apps/desktop/resources/entitlements.local.mac.plist",
-            entitlementsInherit: "apps/desktop/resources/entitlements.local.mac.plist",
+            // Absolute: codesign runs from electron-builder's cwd, not the stage dir.
+            entitlements: path.join(
+              repoRoot,
+              "apps/desktop/resources/entitlements.local.mac.plist",
+            ),
+            entitlementsInherit: path.join(
+              repoRoot,
+              "apps/desktop/resources/entitlements.local.mac.plist",
+            ),
           }
         : {}),
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),

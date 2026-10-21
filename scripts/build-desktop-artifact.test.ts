@@ -2845,7 +2845,11 @@ it.effect(
       assert.equal(mac.identity, "-");
       assert.equal(mac.notarize, false);
       assert.equal(mac.hardenedRuntime, true);
-      assert.equal(mac.entitlements, "apps/desktop/resources/entitlements.local.mac.plist");
+      assert.isTrue(NodePath.isAbsolute(mac.entitlements as string));
+      assert.match(
+        mac.entitlements as string,
+        /[\\/]apps[\\/]desktop[\\/]resources[\\/]entitlements\.local\.mac\.plist$/,
+      );
       assert.equal(mac.entitlementsInherit, mac.entitlements);
       assert.isUndefined(mac.sign);
       assert.isUndefined(mac.provisioningProfile);
