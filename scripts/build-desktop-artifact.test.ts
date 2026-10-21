@@ -545,8 +545,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Beta)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Attention)");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Attention)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -642,14 +642,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.isNull(preview.publish);
       assert.isNull(previewChannel.publish);
-      assert.deepStrictEqual(release.publish, [
-        {
-          provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
-          releaseType: "release",
-        },
-      ]);
+      assert.isNull(release.publish);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
@@ -978,7 +971,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Beta) 1.2.3 Installer",
+        title: "T3 Code (Attention) 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -990,22 +983,35 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).target, ["AppImage", "deb"]);
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "T3 Code (Attention)", schemes: ["t3code-attention"] },
       ]);
       assert.deepStrictEqual((mac.mac as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
-        { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
+        { name: "T3 Code (Attention)", schemes: ["t3code-attention"] },
       ]);
       const macInfo = (mac.mac as { extendInfo: Record<string, unknown> }).extendInfo;
       assert.strictEqual(macInfo.NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac, true);
-      assert.deepStrictEqual(macInfo.CFBundleDocumentTypes, [
-        {
-          CFBundleTypeName: "Web page",
-          CFBundleTypeRole: "Viewer",
-          LSHandlerRank: "Alternate",
-          LSItemContentTypes: ["public.html", "public.xhtml"],
-        },
-      ]);
+      assert.isUndefined(macInfo.CFBundleDocumentTypes);
+      assert.deepEqual(linux.extraMetadata, {
+        name: "t3code-attention",
+        desktopName: "com.matthias-scale.t3code.attention.desktop",
+      });
+      const linuxOptions = linux.linux as Record<string, unknown>;
+      assert.equal(linuxOptions.syncDesktopName, true);
+      assert.equal(linuxOptions.executableName, "t3code-attention");
+      assert.deepEqual(linuxOptions.desktop, { entry: { StartupWMClass: "t3code-attention" } });
+      const metainfo = yield* (yield* FileSystem.FileSystem).readFileString(
+        NodePath.resolve(
+          import.meta.dirname,
+          "../apps/desktop/resources/linux/com.matthias-scale.t3code.attention.metainfo.xml",
+        ),
+      );
+      assert.include(metainfo, "<id>com.matthias-scale.t3code.attention</id>");
+      assert.include(
+        metainfo,
+        '<launchable type="desktop-id">com.matthias-scale.t3code.attention.desktop</launchable>',
+      );
+      assert.include(metainfo, '<icon type="stock">t3code-attention</icon>');
+      assert.include(metainfo, "<binary>t3code-attention</binary>");
       assert.deepStrictEqual(linux.toolsets, { appimage: "1.0.3" });
       assert.notProperty(mac, "toolsets");
       assert.notProperty(win, "toolsets");
@@ -2199,7 +2205,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "com.matthias-scale.t3code.attention",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -2222,7 +2228,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.com.matthias-scale.t3code.attention</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
@@ -2233,7 +2239,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("grants in-app browser passkey entitlements only when the provisioning profile does", () => {
-    const configuration = { appId: "com.t3tools.t3code", teamId: "ABC1234567" };
+    const configuration = { appId: "com.matthias-scale.t3code.attention", teamId: "ABC1234567" };
     const profile = (entitlements: string, outside = "") =>
       `0\x82\x1f\x9a\x06\t*\x86H<?xml version="1.0"?><plist version="1.0"><dict>${outside}<key>Entitlements</key><dict>${entitlements}</dict></dict></plist>\x00\x01`;
     const teamWildcardGroups = `<key>keychain-access-groups</key>
@@ -2275,7 +2281,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         configuration,
       ),
       {
-        touchIdKeychainAccessGroup: "ABC1234567.com.t3tools.t3code.webauthn",
+        touchIdKeychainAccessGroup: "ABC1234567.com.matthias-scale.t3code.attention.webauthn",
         browserPasskeys: true,
       },
     );
@@ -2291,7 +2297,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     );
     assert.match(
       entitlements,
-      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.t3tools\.t3code\.webauthn<\/string>\s*<\/array>/u,
+      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.matthias-scale\.t3code\.attention\.webauthn<\/string>\s*<\/array>/u,
     );
     assert.match(
       entitlements,
@@ -2380,23 +2386,24 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
-  it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
-    Effect.gen(function* () {
-      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
-        entitlementsPath: "/tmp/entitlements.mac.plist",
-        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-      });
+  it.effect(
+    "adds passkey entitlements and only the fork callback protocol to signed macOS builds",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
+          entitlementsPath: "/tmp/entitlements.mac.plist",
+          provisioningProfilePath: "/tmp/t3code.provisionprofile",
+        });
 
-      const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
-      assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
-      assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
-      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
-      assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
-        { name: "Web site URL", schemes: ["http", "https"], role: "Viewer" },
-      ]);
-    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+        const mac = config.mac as Record<string, unknown>;
+        assert.equal(config.appId, "com.matthias-scale.t3code.attention");
+        assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
+        assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+        assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+        assert.deepStrictEqual(mac.protocols, [
+          { name: "T3 Code (Attention)", schemes: ["t3code-attention"] },
+        ]);
+      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
   it.effect("uses the nightly DMG background for nightly macOS builds", () =>
@@ -2803,3 +2810,82 @@ it("ignores trailing separators", () => {
     ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
   );
 });
+
+it.effect(
+  "isolates fork packaging and distinguishes unsigned, local ad-hoc, and release signing",
+  () =>
+    Effect.gen(function* () {
+      const config = (signed: boolean, localAdHoc: boolean) =>
+        createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.1-preview.20261020.2",
+          signed,
+          true,
+          54321,
+          undefined,
+          false,
+          "arm64",
+          localAdHoc,
+        );
+      const unsigned = yield* config(false, false);
+      const local = yield* config(false, true);
+      const release = yield* config(true, false);
+      for (const build of [unsigned, local, release]) {
+        assert.equal(build.appId, "com.matthias-scale.t3code.attention");
+        assert.equal(build.productName, "T3 Code (Attention)");
+        assert.isNull(build.publish);
+        const mac = build.mac as Record<string, unknown>;
+        assert.deepEqual(mac.protocols, [
+          { name: "T3 Code (Attention)", schemes: ["t3code-attention"] },
+        ]);
+        assert.isUndefined((mac.extendInfo as Record<string, unknown>).CFBundleDocumentTypes);
+      }
+      const mac = local.mac as Record<string, unknown>;
+      assert.equal(mac.identity, "-");
+      assert.equal(mac.notarize, false);
+      assert.equal(mac.hardenedRuntime, true);
+      assert.isTrue(NodePath.isAbsolute(mac.entitlements as string));
+      assert.match(
+        mac.entitlements as string,
+        /[\\/]apps[\\/]desktop[\\/]resources[\\/]entitlements\.local\.mac\.plist$/,
+      );
+      assert.equal(mac.entitlementsInherit, mac.entitlements);
+      assert.isUndefined(mac.sign);
+      assert.isUndefined(mac.provisioningProfile);
+      assert.isUndefined((unsigned.mac as Record<string, unknown>).identity);
+      assert.isUndefined((unsigned.mac as Record<string, unknown>).sign);
+      assert.isUndefined((release.mac as Record<string, unknown>).identity);
+      assert.match((release.mac as Record<string, unknown>).sign as string, /sign-macos\.ts$/);
+      const fs = yield* FileSystem.FileSystem;
+      const entitlements = yield* fs.readFileString(
+        NodePath.resolve(import.meta.dirname, "..", String(mac.entitlements)),
+      );
+      assert.include(entitlements, "com.apple.security.cs.disable-library-validation");
+      assert.notInclude(entitlements, "keychain-access-groups");
+      assert.notInclude(entitlements, "com.apple.developer.team-identifier");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  { platform: "mac" as const, signed: true },
+  { platform: "linux" as const, signed: false },
+])(
+  "rejects local ad-hoc signing mixed with release signing or another platform: %s",
+  ({ platform, signed }) =>
+    Effect.gen(function* () {
+      const failure = yield* createBuildConfig(
+        platform,
+        "zip",
+        "0.1.1-preview.20261020.2",
+        signed,
+        false,
+        undefined,
+        undefined,
+        false,
+        "arm64",
+        true,
+      ).pipe(Effect.flip);
+      assert.equal(failure._tag, "LocalAdHocSigningOptionsError");
+    }).pipe(Effect.provide(NodeServices.layer)),
+);

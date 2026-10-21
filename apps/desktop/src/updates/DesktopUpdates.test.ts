@@ -1156,3 +1156,28 @@ describe("describeUpdateErrorCause", () => {
     assert.equal(DesktopUpdates.describeUpdateErrorCause(unreadable), "UnknownError");
   });
 });
+
+it.effect(
+  "keeps fork preview updates disabled without a feed, including after a channel switch",
+  () => {
+    const harness = makeHarness({ env: { T3CODE_DESKTOP_MOCK_UPDATES: "false" } });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        const initial = yield* updates.getState;
+        assert.equal(initial.enabled, false);
+        assert.equal(initial.status, "disabled");
+        assert.equal(
+          initial.message,
+          "Automatic updates are not available because no update feed is configured.",
+        );
+        const switched = yield* updates.setChannel("nightly");
+        assert.equal(switched.enabled, false);
+        assert.equal(switched.status, "disabled");
+        assert.equal(harness.checkCount(), 0);
+        assert.deepEqual(harness.feedUrls(), []);
+      }),
+    ).pipe(Effect.provide(harness.layer));
+  },
+);

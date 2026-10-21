@@ -61,6 +61,9 @@ it("only offers notice details when the description cannot fit", async () => {
 });
 
 it("keeps only the usage limit attached while an active goal waits in the collapsible stack", async () => {
+  // Keep the pointer away from notices mounted under its previous position.
+  container.style.paddingTop = "100px";
+  await userEvent.hover(container, { position: { x: 1, y: 1 } });
   await act(async () =>
     root.render(
       <ComposerBannerStack
