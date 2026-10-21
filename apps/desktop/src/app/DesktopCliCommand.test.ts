@@ -12,6 +12,9 @@ import * as DesktopCliCommand from "./DesktopCliCommand.ts";
 import * as DesktopCliShim from "./DesktopCliShim.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
+/** The marker upstream pingdotgg/t3code writes into, and matches on, its t3 launcher. */
+const UPSTREAM_MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
+
 const environmentFor = (
   path: Path.Path,
   input: { home: string; baseDir: string; platform?: NodeJS.Platform; isPackaged?: boolean },
@@ -130,6 +133,62 @@ it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
       yield* command.uninstall;
       expect(yield* fs.readFileString(theirs)).toBe("npm's t3\n");
       expect(yield* fs.readLink(path.join(home, "bin", "t3"))).toBe(path.join(home, "gone"));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("never claims, replaces or removes the upstream T3 Code app's t3 command", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const upstreamLauncher = path.join(home, ".t3", "bin", "t3");
+      yield* fs.makeDirectory(path.dirname(upstreamLauncher), { recursive: true });
+      yield* fs.writeFileString(
+        upstreamLauncher,
+        `#!/bin/sh\n# ${UPSTREAM_MARKER}\nexec /opt/t3 "$@"\n`,
+        { mode: 0o755 },
+      );
+      const upstreamLink = path.join(home, ".local", "bin", "t3");
+      yield* fs.makeDirectory(path.dirname(upstreamLink), { recursive: true });
+      yield* fs.symlink(upstreamLauncher, upstreamLink);
+
+      const command = yield* commandIn({ home, baseDir: path.join(home, ".t3-attention") });
+      expect((yield* command.state).installedPath).toBeNull();
+      const installed = (yield* command.install).installedPath;
+      expect(installed).toBe(path.join(home, "bin", "t3"));
+      expect(yield* fs.readLink(upstreamLink)).toBe(upstreamLauncher);
+      yield* command.uninstall;
+      expect(yield* fs.exists(installed!)).toBe(false);
+      expect(yield* fs.readLink(upstreamLink)).toBe(upstreamLauncher);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("writes a launcher the upstream T3 Code app does not recognise as its own", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const command = yield* commandIn({ home, baseDir: path.join(home, ".t3-attention") });
+      const link = (yield* command.install).installedPath;
+      const content = yield* fs.readFileString(link!);
+      expect(content).toContain(DesktopCliShim.MARKER);
+      expect(content).not.toContain(UPSTREAM_MARKER);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("upgrades its own launcher written with the shared legacy marker", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const baseDir = path.join(home, ".t3-attention");
+      const launcher = path.join(baseDir, "bin", "t3");
+      yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
+      yield* fs.writeFileString(launcher, `#!/bin/sh\n# ${UPSTREAM_MARKER}\n`, { mode: 0o755 });
+
+      const command = yield* commandIn({ home, baseDir });
+      expect((yield* command.install).installedPath).not.toBeNull();
+      expect(yield* fs.readFileString(launcher)).toContain(DesktopCliShim.MARKER);
     }).pipe(Effect.scoped),
   );
 
