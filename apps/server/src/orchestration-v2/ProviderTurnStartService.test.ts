@@ -3,11 +3,13 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   ContextTransferId,
   MessageId,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
@@ -1274,3 +1276,546 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+const IMPORTED_NATIVE_ID = "3f0c2a7e-5d1b-4c8e-9a6f-0b2d4e6f8a1c";
+
+/**
+ * Starts the first T3 run on a thread whose provider thread may come from an
+ * agent-session import, recording how the run reaches the provider.
+ */
+function makeImportedThreadHarness(
+  input: {
+    readonly driver?: "claudeAgent" | "codex";
+    /** "imported" builds the app and provider thread rows the agent-session importer writes. */
+    readonly appThread?: "imported" | "native";
+    /** The row's native id; null is a provider thread no native session backs yet. */
+    readonly nativeId?: string | null;
+    readonly resumeFails?: boolean;
+    readonly deliveredNativeIds?: ReadonlyArray<string>;
+    readonly fork?: "native" | "portable";
+  } = {},
+) {
+  const now = DateTime.makeUnsafe("2026-10-22T06:15:00Z");
+  const driver = ProviderDriverKind.make(input.driver ?? "claudeAgent");
+  const instanceId = ProviderInstanceId.make(input.driver ?? "claudeAgent");
+  const imported = (input.appThread ?? "imported") === "imported" && input.fork === undefined;
+  const threadId = imported
+    ? ThreadId.make(`import:${instanceId}:${IMPORTED_NATIVE_ID}`)
+    : ThreadId.make("thread-imported-history-target");
+  const nativeId = input.nativeId === undefined ? IMPORTED_NATIVE_ID : input.nativeId;
+  const providerThreadId =
+    input.fork !== undefined
+      ? IdAllocator.deriveProviderThread({ driver, nativeThreadId: "pending:fork-run" })
+      : IdAllocator.deriveProviderThread({
+          driver,
+          providerInstanceId: instanceId,
+          nativeThreadId: nativeId ?? "pending:fresh-run",
+        });
+  const providerSessionId = ProviderSessionId.make("provider-session-imported-history");
+  const runId = RunId.make("run-imported-history");
+  const attemptId = RunAttemptId.make("attempt-imported-history");
+  const rootNodeId = NodeId.make("root-imported-history");
+  const checkpointScopeId = CheckpointScopeId.make("scope-imported-history");
+  const messageId = MessageId.make("message-imported-history");
+  const sourceThreadId = ThreadId.make(`import:${instanceId}:${IMPORTED_NATIVE_ID}`);
+  const sourceProviderThreadId = IdAllocator.deriveProviderThread({
+    driver,
+    providerInstanceId: instanceId,
+    nativeThreadId: IMPORTED_NATIVE_ID,
+  });
+  const nativeRef = (id: string) => ({ driver, nativeId: id, strength: "strong" as const });
+  const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
+    id: providerThreadId,
+    driver,
+    providerInstanceId: instanceId,
+    providerSessionId,
+    appThreadId: threadId,
+    ownerNodeId: null,
+    nativeThreadRef: input.fork !== undefined || nativeId === null ? null : nativeRef(nativeId),
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const sourceProviderThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
+    ...providerThread,
+    id: sourceProviderThreadId,
+    appThreadId: sourceThreadId,
+    providerSessionId: null,
+    nativeThreadRef: nativeRef(IMPORTED_NATIVE_ID),
+  };
+  const sourceRun: OrchestrationV2ThreadProjection["runs"][number] = {
+    id: RunId.make("run-imported-source"),
+    threadId: sourceThreadId,
+    ordinal: 1,
+    providerInstanceId: instanceId,
+    modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+    providerThreadId: sourceProviderThreadId,
+    userMessageId: MessageId.make("message-imported-source"),
+    rootNodeId: NodeId.make("root-imported-source"),
+    activeAttemptId: RunAttemptId.make("attempt-imported-source"),
+    status: "completed",
+    requestedAt: now,
+    startedAt: now,
+    completedAt: now,
+    checkpointId: null,
+    contextHandoffId: null,
+  };
+  const run: OrchestrationV2ThreadProjection["runs"][number] = {
+    ...sourceRun,
+    id: runId,
+    threadId,
+    ordinal: 1 + (input.deliveredNativeIds?.length ?? 0),
+    providerThreadId,
+    userMessageId: messageId,
+    rootNodeId,
+    activeAttemptId: attemptId,
+    status: "starting",
+    startedAt: null,
+    completedAt: null,
+  };
+  const delivered = (input.deliveredNativeIds ?? []).map((deliveredNativeId, index) => ({
+    run: {
+      ...run,
+      id: RunId.make(`run-delivered-${index}`),
+      ordinal: index + 1,
+      activeAttemptId: RunAttemptId.make(`attempt-delivered-${index}`),
+      status: "completed" as const,
+    },
+    attempt: {
+      id: RunAttemptId.make(`attempt-delivered-${index}`),
+      runId: RunId.make(`run-delivered-${index}`),
+      rootNodeId,
+      attemptOrdinal: 1,
+      providerInstanceId: instanceId,
+      providerThreadId,
+      providerTurnId: ProviderTurnId.make(`provider-turn-delivered-${index}`),
+      nativeThreadId: deliveredNativeId,
+      reason: "initial" as const,
+      status: "completed" as const,
+      startedAt: now,
+      completedAt: now,
+    },
+    providerTurn: {
+      id: ProviderTurnId.make(`provider-turn-delivered-${index}`),
+      providerThreadId,
+      nodeId: rootNodeId,
+      runAttemptId: RunAttemptId.make(`attempt-delivered-${index}`),
+      nativeTurnRef: null,
+      ordinal: index + 1,
+      status: "completed" as const,
+      startedAt: now,
+      completedAt: now,
+    },
+  }));
+  const forkTransferId = ContextTransferId.make("transfer-imported-history-fork");
+  const portableHandoff = {
+    id: ContextHandoffId.make("handoff-imported-history-fork"),
+    threadId,
+    targetRunId: runId,
+    transferId: forkTransferId,
+    fromProviderThreadIds: [sourceProviderThreadId],
+    toProviderThreadId: providerThreadId,
+    fromProviderInstanceId: instanceId,
+    toProviderInstanceId: instanceId,
+    coveredRunOrdinals: { from: 1, to: 1 },
+    strategy: "full_thread_summary",
+    status: "ready",
+    history: {
+      coverage: "Imported Claude session history.",
+      messages: [
+        {
+          itemId: "agent-session-import:v2:turn-item:imported:000000",
+          role: "user",
+          text: "Fix the imported bug",
+        },
+      ],
+    },
+    createdAt: now,
+    updatedAt: now,
+  } as unknown as OrchestrationV2ThreadProjection["contextHandoffs"][number];
+  let projection: OrchestrationV2ThreadProjection = {
+    thread: {
+      id: threadId,
+      projectId: ProjectId.make("project-imported-history"),
+      providerInstanceId: instanceId,
+      activeProviderThreadId: providerThreadId,
+      historyOrigin: imported ? "v1_import" : "native",
+      branch: null,
+      worktreePath: null,
+    } as OrchestrationV2ThreadProjection["thread"],
+    runs: [...delivered.map((entry) => entry.run), run],
+    attempts: [
+      ...delivered.map((entry) => entry.attempt),
+      {
+        id: attemptId,
+        runId,
+        rootNodeId,
+        attemptOrdinal: 1,
+        providerInstanceId: instanceId,
+        providerThreadId,
+        providerTurnId: null,
+        reason: "initial",
+        status: "pending",
+        startedAt: null,
+        completedAt: null,
+      },
+    ],
+    nodes: [
+      {
+        id: rootNodeId,
+        threadId,
+        runId,
+        parentNodeId: null,
+        rootNodeId,
+        kind: "root_turn",
+        status: "pending",
+        countsForRun: true,
+        providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId,
+        startedAt: null,
+        completedAt: null,
+      },
+    ],
+    providerThreads: [providerThread],
+    messages: [
+      {
+        id: messageId,
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        role: "user",
+        text: "Continue the imported work",
+        attachments: [],
+        streaming: false,
+        createdBy: "user",
+        creationSource: "web",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ],
+    checkpointScopes: [
+      {
+        id: checkpointScopeId,
+        threadId,
+        runId,
+        nodeId: rootNodeId,
+        parentScopeId: null,
+        providerThreadId,
+        kind: "root_run",
+        ordinalWithinParent: 0,
+        advancesAppRunCount: true,
+        cwd: "/tmp/imported-history",
+        createdAt: now,
+      },
+    ],
+    providerSessions: [],
+    providerTurns: delivered.map((entry) => entry.providerTurn),
+    contextHandoffs: input.fork === "portable" ? [portableHandoff] : [],
+    contextTransfers:
+      input.fork === "native"
+        ? [
+            {
+              id: forkTransferId,
+              type: "fork",
+              sourceThreadId,
+              targetThreadId: threadId,
+              sourcePoint: { threadId: sourceThreadId, runId: sourceRun.id },
+              basePoint: null,
+              sourceProviderInstanceId: instanceId,
+              targetProviderInstanceId: instanceId,
+              targetRunId: runId,
+              status: "pending",
+              resolution: null,
+              createdBy: "user",
+              error: null,
+              createdAt: now,
+              updatedAt: now,
+              consumedAt: null,
+            },
+          ]
+        : [],
+    turnItems: [],
+    visibleTurnItems: [],
+    runtimeRequests: [],
+    subagents: [],
+    plans: [],
+    checkpoints: [],
+    updatedAt: now,
+  };
+  const withConversation = () => ({ ...projection, hasConversation: true });
+  const writeIfRunCurrent = vi.fn<EventSink.EventSinkV2Shape["writeIfRunCurrent"]>(
+    ({ events: incoming, activeAttemptId, expectedStatus }) =>
+      Effect.sync(() => {
+        const current = projection.runs.find((candidate) => candidate.id === runId);
+        const committed =
+          current?.activeAttemptId === activeAttemptId && current.status === expectedStatus;
+        if (committed) {
+          for (const event of incoming)
+            projection = ProjectionStore.applyToProjection(projection, event);
+        }
+        return { committed, storedEvents: [] };
+      }),
+  );
+  const startTurn = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"]>(() =>
+    Effect.succeed({} as never),
+  );
+  const loaded = (nativeThreadId: string) => ({
+    ...providerThread,
+    nativeThreadRef: nativeRef(nativeThreadId),
+  });
+  const resumeThread = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>(
+    ({ providerThread: resumed }) =>
+      input.resumeFails === true
+        ? Effect.fail(
+            new ProviderAdapter.ProviderAdapterEventStreamError({
+              driver,
+              providerSessionId,
+              cause: "No conversation found with session ID",
+            }),
+          )
+        : Effect.succeed(resumed),
+  );
+  const ensureThread = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["ensureThread"]>(() =>
+    Effect.succeed(loaded("fresh-native-session")),
+  );
+  const forkThread = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["forkThread"]>(() =>
+    Effect.succeed({
+      ...loaded("forked-native-session"),
+      forkedFrom: { providerThreadId: sourceProviderThreadId },
+    }),
+  );
+  const session = {
+    driver,
+    providerSession: {
+      id: providerSessionId,
+      driver,
+      providerInstanceId: instanceId,
+      status: "ready",
+      cwd: "/tmp/imported-history",
+      model: null,
+      capabilities: CodexProviderCapabilitiesV2,
+      createdAt: now,
+      updatedAt: now,
+      lastError: null,
+    },
+    resumeThread,
+    ensureThread,
+    forkThread,
+    startTurn,
+  } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  const open = vi.fn(() => Effect.succeed(session));
+  const startRootRun = vi.fn<
+    (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
+  >(() => Effect.void);
+  const layer = ProviderTurnStart.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
+          prepareProviderHandoff: (handoff) =>
+            Effect.succeed({
+              ...portableHandoff,
+              ...handoff,
+              id: ContextHandoffId.make("handoff-imported-history-fallback"),
+            } as never),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          write: ({ events: incoming }) =>
+            Effect.sync(() => {
+              for (const event of incoming)
+                projection = ProjectionStore.applyToProjection(projection, event);
+              return [];
+            }),
+        }),
+        IdAllocator.layer,
+        layerWorktreeLocation(),
+        FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
+        Layer.mock(GitWorkflow.GitWorkflowService)({}),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: (requested) =>
+            Effect.succeed(
+              requested === sourceThreadId && input.fork !== undefined
+                ? ({
+                    ...projection,
+                    runs: [sourceRun],
+                    providerThreads: [sourceProviderThread],
+                    attempts: [],
+                    providerTurns: [],
+                  } as OrchestrationV2ThreadProjection)
+                : projection,
+            ),
+          getTurnStartContext: () => Effect.succeed(withConversation()),
+          getRuntimeRecoveryProjection: () => Effect.succeed(withConversation()),
+          getTurnStartHistory: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
+        Layer.mock(ProviderAuthService.ProviderAuthService)({
+          tryHandlePromptCommand: () => Effect.succeed(false),
+        }),
+        Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({
+          resolve: () => Effect.succeed({ cwd: "/tmp/imported-history" } as never),
+        }),
+      ),
+    ),
+  );
+  return {
+    resumeThread,
+    ensureThread,
+    forkThread,
+    startTurn,
+    sourceProviderThreadId,
+    startRootRun: () => {
+      expect(startRootRun).toHaveBeenCalledOnce();
+      return startRootRun.mock.calls[0]![0];
+    },
+    start: Effect.gen(function* () {
+      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
+    }).pipe(Effect.provide(layer)),
+  };
+}
+
+effectIt.effect("resumes an imported Claude session on its first T3 turn", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness();
+
+    yield* harness.start;
+
+    expect(harness.resumeThread).toHaveBeenCalledOnce();
+    expect(harness.ensureThread).not.toHaveBeenCalled();
+    const started = harness.startRootRun();
+    expect(started.providerTurnOrdinal).toBe(1);
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe(IMPORTED_NATIVE_ID);
+    expect(started.nativeThreadHasTurns).toBe(true);
+  }),
+);
+
+effectIt.effect("creates a fresh Claude native session on its first T3 turn", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({ appThread: "native", nativeId: null });
+
+    yield* harness.start;
+
+    expect(harness.ensureThread).toHaveBeenCalledOnce();
+    expect(harness.resumeThread).not.toHaveBeenCalled();
+    const started = harness.startRootRun();
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe("fresh-native-session");
+    expect(started.nativeThreadHasTurns).toBe(false);
+  }),
+);
+
+effectIt.effect("does not count import provenance for another provider thread", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({ nativeId: "switched-native-session" });
+
+    yield* harness.start;
+
+    const started = harness.startRootRun();
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe("switched-native-session");
+    expect(started.nativeThreadHasTurns).toBe(false);
+  }),
+);
+
+effectIt.effect(
+  "does not count imported or delivered history after resume falls back to a fresh native session",
+  () =>
+    Effect.gen(function* () {
+      const harness = makeImportedThreadHarness({
+        resumeFails: true,
+        deliveredNativeIds: [IMPORTED_NATIVE_ID],
+      });
+
+      yield* harness.start;
+
+      expect(harness.resumeThread).toHaveBeenCalledOnce();
+      expect(harness.ensureThread).toHaveBeenCalledOnce();
+      const started = harness.startRootRun();
+      expect(started.providerThread.nativeThreadRef?.nativeId).toBe("fresh-native-session");
+      expect(started.nativeThreadHasTurns).toBe(false);
+    }),
+);
+
+effectIt.effect("counts delivered history on the imported native session", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({
+      appThread: "native",
+      deliveredNativeIds: ["earlier-native-session", IMPORTED_NATIVE_ID],
+    });
+
+    yield* harness.start;
+
+    const started = harness.startRootRun();
+    expect(started.providerTurnOrdinal).toBe(3);
+    expect(started.nativeThreadHasTurns).toBe(true);
+  }),
+);
+
+effectIt.effect("natively forks imported Claude history into the target thread", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({ fork: "native" });
+
+    yield* harness.start;
+
+    expect(harness.forkThread).toHaveBeenCalledOnce();
+    expect(harness.forkThread.mock.calls[0]?.[0].sourceProviderThread).toMatchObject({
+      id: harness.sourceProviderThreadId,
+      nativeThreadRef: { nativeId: IMPORTED_NATIVE_ID },
+    });
+    expect(harness.ensureThread).not.toHaveBeenCalled();
+    const started = harness.startRootRun();
+    // The adapter resumes the fork it just created; see ClaudeAdapterV2 fork tests.
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe("forked-native-session");
+    expect(started.nativeThreadHasTurns).toBe(false);
+  }),
+);
+
+effectIt.effect("starts a portable fork of imported history fresh with its context handoff", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({ fork: "portable" });
+
+    yield* harness.start;
+
+    expect(harness.ensureThread).toHaveBeenCalledOnce();
+    expect(harness.forkThread).not.toHaveBeenCalled();
+    const started = harness.startRootRun();
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe("fresh-native-session");
+    expect(started.nativeThreadHasTurns).toBe(false);
+    yield* started.session.startTurn({
+      providerThread: started.providerThread,
+      message: { text: "Continue the imported work", attachments: [] },
+    } as never);
+    expect(harness.startTurn.mock.calls[0]?.[0].message.text).toContain(
+      "Imported Claude session history.",
+    );
+  }),
+);
+
+effectIt.effect("resumes an imported Codex thread and accepts its first T3 turn", () =>
+  Effect.gen(function* () {
+    const harness = makeImportedThreadHarness({ driver: "codex" });
+
+    yield* harness.start;
+
+    expect(harness.ensureThread).not.toHaveBeenCalled();
+    expect(harness.resumeThread).toHaveBeenCalledOnce();
+    expect(harness.resumeThread.mock.calls[0]?.[0].providerThread.nativeThreadRef?.nativeId).toBe(
+      IMPORTED_NATIVE_ID,
+    );
+    const started = harness.startRootRun();
+    expect(started.providerThread.nativeThreadRef?.nativeId).toBe(IMPORTED_NATIVE_ID);
+    yield* started.session.startTurn({
+      providerThread: started.providerThread,
+      message: { text: "Continue the imported work", attachments: [] },
+    } as never);
+    expect(harness.startTurn).toHaveBeenCalledOnce();
+  }),
+);

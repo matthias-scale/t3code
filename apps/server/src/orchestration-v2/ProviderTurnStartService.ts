@@ -3,12 +3,14 @@ import { projectComposerContextForProvider } from "@t3tools/shared/composerConte
 import {
   CommandId,
   latestProviderTurnForAttempt,
+  type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
   type OrchestrationV2TurnItem,
+  ProviderInstanceId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -82,6 +84,35 @@ const PROMPT_REFUSAL_TAGS = [
 const refusedBeforePrompt = (error: unknown): boolean =>
   PROMPT_REFUSAL_TAGS.some((tag) => Predicate.isTagged(error, tag)) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
+
+const isProviderInstanceId = Schema.is(ProviderInstanceId);
+
+/**
+ * Agent-session imports adopt a native session that already has history, before
+ * any T3 attempt reaches it. The importer names the app thread
+ * `import:<instance>:<native id>` and derives the provider thread from that
+ * native id, so the provenance holds only while the thread still runs on it.
+ */
+const continuesImportedNativeSession = (
+  thread: OrchestrationV2AppThread,
+  providerThread: OrchestrationV2ProviderThread,
+): boolean => {
+  const nativeId = providerThread.nativeThreadRef?.nativeId;
+  if (thread.historyOrigin !== "v1_import" || nativeId == null) return false;
+  const prefix = "import:";
+  const suffix = `:${nativeId}`;
+  if (!thread.id.startsWith(prefix) || !thread.id.endsWith(suffix)) return false;
+  const providerInstanceId = thread.id.slice(prefix.length, -suffix.length);
+  return (
+    isProviderInstanceId(providerInstanceId) &&
+    providerThread.id ===
+      IdAllocator.deriveProviderThread({
+        driver: providerThread.driver,
+        providerInstanceId,
+        nativeThreadId: nativeId,
+      })
+  );
+};
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
@@ -1247,6 +1278,7 @@ export const layer: Layer.Layer<
               .map((turn) => turn.ordinal),
           ) + 1,
         nativeThreadHasTurns:
+          continuesImportedNativeSession(projection.thread, runningProviderThread) ||
           nativeInputRunIds.size > 0 ||
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
