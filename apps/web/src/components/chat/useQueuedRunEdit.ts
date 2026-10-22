@@ -1,3 +1,5 @@
+import { pendingSends } from "./pendingSends";
+import { restoreComposerDraft } from "./chatViewSend";
 import type { ThreadStructure } from "@t3tools/client-runtime/state/shell";
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -40,10 +42,15 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import type { ChatComposerHandle } from "./ChatComposer";
 import { fileAttachmentCapabilityBlockReason } from "./composerAttachmentFiles";
-import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./queuedMessageEdit";
+import {
+  preparePendingSendEdit,
+  prepareQueuedEditAttachments,
+  recoverQueuedMessageEdit,
+} from "./queuedMessageEdit";
 import type { EditQueuedRunRequest } from "./QueuedRunsControl";
 
 interface EditingQueuedRun {
+  readonly pendingId?: string;
   readonly threadId: ThreadId;
   readonly runId: RunId;
   readonly messageId: MessageId;
@@ -217,14 +224,21 @@ export function useQueuedRunEdit(input: {
       .getState()
       .clearComposerContent(queuedEditDraftTarget(routeThreadRef, runId));
 
-  const beginEdit = useStableCallback((request: EditQueuedRunRequest) => {
+  const beginEdit = useStableCallback(async (request: EditQueuedRunRequest) => {
+    const pending = request.pendingId
+      ? pendingSends.getSnapshot().find((entry) => entry.id === request.pendingId)
+      : null;
+    if (request.pendingId && (!pending || !(await pendingSends.pause(request.pendingId, true))))
+      return;
     if (activeThreadId === null) return;
     if (editing !== null && editing.runId !== request.runId) clearEditDraft(editing.runId);
     const target = queuedEditDraftTarget(routeThreadRef, request.runId);
     const store = useComposerDraftStore.getState();
     store.clearComposerContent(target);
     store.setPrompt(target, request.text);
+    if (pending) restoreComposerDraft(target, pending.value.snapshot);
     setEditing({
+      ...(request.pendingId ? { pendingId: request.pendingId } : {}),
       threadId: activeThreadId,
       runId: request.runId,
       messageId: request.messageId,
@@ -236,11 +250,18 @@ export function useQueuedRunEdit(input: {
     focusComposerSoon();
   });
   const cancelEdit = useStableCallback(() => {
-    if (editing === null) return;
+    if (editing === null || saveInFlightRef.current) return;
+    if (editing.pendingId) void pendingSends.pause(editing.pendingId, false);
     clearEditDraft(editing.runId);
     setEditing(null);
     focusComposerSoon();
   });
+  useEffect(() => {
+    const id = editing?.pendingId;
+    return () => {
+      if (id) void pendingSends.pause(id, false);
+    };
+  }, [editing?.pendingId]);
   const removeEditingAttachment = useStableCallback((attachmentId: string) => {
     setEditing((current) =>
       current === null
@@ -259,7 +280,7 @@ export function useQueuedRunEdit(input: {
   // draft when that draft is empty; otherwise it is dropped with a toast.
   useEffect(() => {
     if (editing === null || activeThreadId !== editing.threadId) return;
-    if (serverProjection === null) return;
+    if (editing.pendingId || serverProjection === null) return;
     const run = serverProjection.runs.find((candidate) => candidate.id === editing.runId);
     if (run !== undefined && run.status === "queued") return;
     const recovery = recoverQueuedMessageEdit({
@@ -311,6 +332,33 @@ export function useQueuedRunEdit(input: {
     ) {
       return;
     }
+    if (editing.pendingId) {
+      const entry = pendingSends.getSnapshot().find((entry) => entry.id === editing.pendingId);
+      if (!entry) return;
+      saveInFlightRef.current = true;
+      setIsSaving(true);
+      try {
+        const saved = await pendingSends.edit(
+          editing.pendingId,
+          preparePendingSendEdit(entry.value, content),
+        );
+        if (!saved) return;
+        promptRef.current = "";
+        clearEditDraft(editing.runId);
+        composerRef.current?.resetCursorState();
+        setEditing(null);
+        focusComposerSoon();
+      } catch (error) {
+        setThreadError(
+          editing.threadId,
+          error instanceof Error ? error.message : "Could not save queued message.",
+        );
+      } finally {
+        saveInFlightRef.current = false;
+        setIsSaving(false);
+      }
+      return;
+    }
     saveInFlightRef.current = true;
     setIsSaving(true);
     const error = await submitQueuedRunEdit({
@@ -335,6 +383,7 @@ export function useQueuedRunEdit(input: {
   return {
     editingRunId: editing?.runId ?? null,
     isEditing: editing !== null,
+    isEditingPendingMessage: editing?.pendingId !== undefined,
     isSaving,
     draftTarget,
     editingAttachments,

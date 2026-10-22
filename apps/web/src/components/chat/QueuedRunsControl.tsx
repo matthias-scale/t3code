@@ -1,3 +1,5 @@
+import { pendingSends, usePendingSends } from "./pendingSends";
+import { RunId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { deriveThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
 import { assistantCitationsToPlainText } from "@t3tools/shared/assistantCitations";
@@ -6,7 +8,6 @@ import type {
   ChatAttachment as ContractChatAttachment,
   EnvironmentId,
   MessageId,
-  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import {
@@ -15,6 +16,7 @@ import {
   GripVerticalIcon,
   ListOrderedIcon,
   PencilIcon,
+  XIcon,
 } from "lucide-react";
 import { useId, useImperativeHandle, useRef, useState, type Ref } from "react";
 
@@ -29,6 +31,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export interface EditQueuedRunRequest {
+  readonly pendingId?: string;
   readonly runId: RunId;
   readonly messageId: MessageId;
   readonly text: string;
@@ -77,6 +80,11 @@ export function QueuedRunsControl({
   readonly onEditQueuedRun: (request: EditQueuedRunRequest) => void;
   readonly onCancelEdit: () => void;
 }) {
+  const pending = usePendingSends().filter(
+    (entry) =>
+      entry.value.environmentId === props.environmentId &&
+      entry.value.input.threadId === props.threadId,
+  );
   const projection = useThreadProjection(
     scopeThreadRef(props.environmentId, props.threadId),
   )?.projection;
@@ -116,7 +124,10 @@ export function QueuedRunsControl({
     }),
   );
   const optimisticQueued = props.optimisticMessages.filter(
-    (message) => message.inputIntent === "queued_turn" && !acknowledgedMessageIds.has(message.id),
+    (message) =>
+      message.inputIntent === "queued_turn" &&
+      !acknowledgedMessageIds.has(message.id) &&
+      !pending.some((entry) => entry.id === message.id),
   );
   const items = [
     ...queued.map(({ run, text, attachments }, serverIndex) => ({
@@ -134,7 +145,29 @@ export function QueuedRunsControl({
           url: queuedImageUrlById.get(attachment.id) ?? null,
         })),
       pending: false,
+      localId: null as string | null,
+      editable: true,
+      error: null as string | null,
     })),
+    ...pending
+      .filter((entry) => !acknowledgedMessageIds.has(entry.value.input.message.messageId))
+      .map((entry) => ({
+        key: entry.id,
+        runId: RunId.make(entry.id),
+        messageId: entry.value.input.message.messageId,
+        serverIndex: null,
+        text: entry.value.snapshot.messageText,
+        attachments: [] as ReadonlyArray<ContractChatAttachment>,
+        thumbnails: entry.value.snapshot.images.map<QueuedRowThumbnail>((image) => ({
+          key: image.id,
+          name: image.name,
+          url: image.previewUrl,
+        })),
+        pending: true,
+        localId: entry.id,
+        editable: !entry.attempted,
+        error: entry.error,
+      })),
     ...optimisticQueued.map((message) => ({
       key: message.id,
       runId: null,
@@ -150,6 +183,9 @@ export function QueuedRunsControl({
           url: attachment.previewUrl ?? null,
         })),
       pending: true,
+      localId: null as string | null,
+      editable: false,
+      error: null as string | null,
     })),
   ];
 
@@ -201,6 +237,18 @@ export function QueuedRunsControl({
     // Declines while a queued message is already being edited so the key keeps
     // moving the caret inside that draft.
     editLatest(repeat) {
+      const local = pending.findLast((entry) => !entry.attempted);
+      if (local && props.editingRunId === null && busyRunId === null) {
+        if (!repeat)
+          props.onEditQueuedRun({
+            pendingId: local.id,
+            runId: RunId.make(local.id),
+            messageId: local.value.input.message.messageId,
+            text: local.value.snapshot.messageText,
+            attachments: [],
+          });
+        return true;
+      }
       const latest = queued.at(-1);
       if (!latest || props.editingRunId !== null || busyRunId !== null) return false;
       if (!repeat) {
@@ -353,7 +401,7 @@ export function QueuedRunsControl({
                     {isEditing ? <span className="sr-only">Editing queued message: </span> : null}
                     {item.pending ? (
                       <Clock3Icon
-                        aria-label="Saving queued message"
+                        aria-label={item.error ?? "Waiting to send queued message"}
                         className="size-3 shrink-0 text-muted-foreground/60"
                       />
                     ) : null}
@@ -390,6 +438,18 @@ export function QueuedRunsControl({
                     </Tooltip>
                   </ComposerBanner.Content>
                   <ComposerBanner.Actions>
+                    {item.localId !== null && item.editable && !isEditing ? (
+                      <Button
+                        size="icon-xs"
+                        variant="ghost-muted"
+                        aria-label="Cancel queued message"
+                        onClick={() => {
+                          void pendingSends.cancel(item.localId!);
+                        }}
+                      >
+                        <XIcon />
+                      </Button>
+                    ) : null}
                     {isEditing ? (
                       <Button
                         size="xs"
@@ -408,10 +468,13 @@ export function QueuedRunsControl({
                                 size="icon-xs"
                                 variant="ghost-muted"
                                 aria-label="Edit queued message"
-                                disabled={item.runId === null || busyRunId !== null}
+                                disabled={
+                                  !item.editable || item.runId === null || busyRunId !== null
+                                }
                                 onClick={() => {
                                   if (item.runId !== null && item.messageId !== null) {
                                     props.onEditQueuedRun({
+                                      ...(item.localId ? { pendingId: item.localId } : {}),
                                       runId: item.runId,
                                       messageId: item.messageId,
                                       text: item.text,
@@ -433,7 +496,12 @@ export function QueuedRunsControl({
                             <Button
                               size="xs"
                               variant="ghost-muted"
-                              disabled={item.runId === null || busyRunId !== null || !canSend}
+                              disabled={
+                                item.pending ||
+                                item.runId === null ||
+                                busyRunId !== null ||
+                                !canSend
+                              }
                               onClick={() => {
                                 if (item.runId !== null) {
                                   void sendQueuedMessage(item.runId);
@@ -453,7 +521,9 @@ export function QueuedRunsControl({
                             render={
                               <ComposerBanner.Dismiss
                                 aria-label="Remove queued message"
-                                disabled={item.runId === null || busyRunId !== null}
+                                disabled={
+                                  !item.editable || item.runId === null || busyRunId !== null
+                                }
                                 onClick={() => {
                                   if (item.runId !== null) void remove(item.runId);
                                 }}

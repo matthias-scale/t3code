@@ -1,4 +1,4 @@
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { CommandId, EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
@@ -7,7 +7,11 @@ import {
   type ComposerFileAttachment,
   type ComposerImageAttachment,
 } from "../../composerDraftStore";
-import { prepareQueuedEditAttachments, recoverQueuedMessageEdit } from "./queuedMessageEdit";
+import {
+  preparePendingSendEdit,
+  prepareQueuedEditAttachments,
+  recoverQueuedMessageEdit,
+} from "./queuedMessageEdit";
 
 const environmentId = EnvironmentId.make("remote-environment");
 const threadTarget = scopeThreadRef(environmentId, ThreadId.make("thread:edit"));
@@ -96,4 +100,51 @@ describe("queued message file edits", () => {
     expect(store.getComposerDraft(threadTarget)?.prompt).toBe("Separate draft");
     expect(store.getComposerDraft(editTarget)).toBeNull();
   });
+});
+
+it("edits an unsent message without losing its retry identity, effort prefix or files", () => {
+  const snapshot = {
+    messageText: "original",
+    images: [image],
+    files: [file],
+    attachments: [image, file],
+    terminalContexts: [],
+    reviewComments: [],
+    previewAnnotations: [],
+    threadContexts: [],
+  };
+  const edited = preparePendingSendEdit(
+    {
+      environmentId,
+      prepared: true,
+      snapshot,
+      input: {
+        commandId: CommandId.make("accepted-command"),
+        threadId: threadTarget.threadId,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        message: {
+          messageId: MessageId.make("accepted-message"),
+          role: "user",
+          text: "ultrathink\noriginal",
+          attachments: [],
+        },
+      },
+    },
+    {
+      prompt: "edited",
+      images: [image],
+      files: [file],
+      terminalContexts: [],
+      reviewComments: [],
+      previewAnnotations: [],
+      threadContexts: [],
+    },
+  );
+  expect(edited.input.commandId).toBe("accepted-command");
+  expect(edited.input.message.messageId).toBe("accepted-message");
+  expect(edited.input.message.text).toBe("ultrathink\nedited");
+  expect(edited.snapshot.files).toEqual([file]);
+  expect(edited.snapshot.images).toEqual([image]);
+  expect(edited.prepared).toBe(false);
 });

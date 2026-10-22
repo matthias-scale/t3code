@@ -55,13 +55,20 @@ const draftSendStateByRouteKey = new Map<
   string,
   {
     readonly sendInFlight: { current: boolean };
+    readonly sendingDraft: { current: unknown };
+    readonly queueAcceptanceInFlight: { current: boolean };
     readonly uncertainSubmissions: { current: Map<string, ThreadId> };
   }
 >();
 export function draftSendState(routeKey: string) {
   let state = draftSendStateByRouteKey.get(routeKey);
   if (!state) {
-    state = { sendInFlight: { current: false }, uncertainSubmissions: { current: new Map() } };
+    state = {
+      sendInFlight: { current: false },
+      sendingDraft: { current: null },
+      queueAcceptanceInFlight: { current: false },
+      uncertainSubmissions: { current: new Map() },
+    };
     draftSendStateByRouteKey.set(routeKey, state);
   }
   return state;

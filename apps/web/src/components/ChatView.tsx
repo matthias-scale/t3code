@@ -2951,24 +2951,23 @@ export default function ChatView(props: ChatViewProps) {
   const sendPreviewAnnotationStable = useStableCallback(sendPreviewAnnotation);
   const onComposerResumeStable = useStableCallback(onResume);
   const onComposerCompactContextStable = useStableCallback(onCompactContext);
-  const queuedRunsControl =
-    isServerThread && activeThread ? (
-      <QueuedRunsControl
-        ref={queuedRunsControlRef}
-        steerShortcutLabel={shortcutLabelForCommand(keybindings, "thread.steerQueuedMessage", {
-          context: { terminalFocus: false },
-        })}
-        editShortcutLabel={shortcutLabelForCommand(keybindings, "thread.editQueuedMessage", {
-          context: { composerFocus: true },
-        })}
-        environmentId={activeThread.environmentId}
-        threadId={activeThread.id}
-        optimisticMessages={optimisticUserMessages}
-        editingRunId={queuedRunEdit.editingRunId}
-        onEditQueuedRun={queuedRunEdit.beginEdit}
-        onCancelEdit={queuedRunEdit.cancelEdit}
-      />
-    ) : null;
+  const queuedRunsControl = activeThread ? (
+    <QueuedRunsControl
+      ref={queuedRunsControlRef}
+      steerShortcutLabel={shortcutLabelForCommand(keybindings, "thread.steerQueuedMessage", {
+        context: { terminalFocus: false },
+      })}
+      editShortcutLabel={shortcutLabelForCommand(keybindings, "thread.editQueuedMessage", {
+        context: { composerFocus: true },
+      })}
+      environmentId={activeThread.environmentId}
+      threadId={activeThread.id}
+      optimisticMessages={optimisticUserMessages}
+      editingRunId={queuedRunEdit.editingRunId}
+      onEditQueuedRun={queuedRunEdit.beginEdit}
+      onCancelEdit={queuedRunEdit.cancelEdit}
+    />
+  ) : null;
   // One-shot: the resend "Work locally" queued fires once, then the marker clears.
   const resendAfterWorkLocally = () => {
     setWorkLocallyResendDraftId(null);
@@ -3522,11 +3521,9 @@ export default function ChatView(props: ChatViewProps) {
                                       ? "Rewinding conversation"
                                       : feedbackUploading
                                         ? "Sending feedback"
-                                        : threadDetailLoading
-                                          ? "Messages loading"
-                                          : worktreeSetupBlocksSend
-                                            ? "Preparing worktree"
-                                            : projectCloneSendBlockReason
+                                        : worktreeSetupBlocksSend
+                                          ? "Preparing worktree"
+                                          : projectCloneSendBlockReason
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={queuedRunsControl}
@@ -3633,6 +3630,7 @@ export default function ChatView(props: ChatViewProps) {
                               onExpandImage={onExpandTimelineImageStable}
                               onFileOpen={openFileAttachmentStable}
                               editingQueuedAttachments={queuedRunEdit.editingAttachments}
+                              isEditingPendingMessage={queuedRunEdit.isEditingPendingMessage}
                               onRemoveEditingQueuedAttachment={
                                 queuedRunEdit.removeEditingAttachment
                               }

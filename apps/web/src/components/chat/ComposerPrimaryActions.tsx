@@ -45,6 +45,7 @@ interface ComposerPrimaryActionsProps {
   canResume?: boolean;
   preserveComposerFocusOnPointerDown?: boolean;
   isEditingQueuedMessage?: boolean;
+  isEditingPendingMessage?: boolean;
   onSubmitMessage?: MouseEventHandler<HTMLButtonElement>;
   onResume?: () => void;
   onPreviousPendingQuestion: () => void;
@@ -100,6 +101,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   canResume = false,
   preserveComposerFocusOnPointerDown = false,
   isEditingQueuedMessage = false,
+  isEditingPendingMessage = false,
   onSubmitMessage,
   onResume,
   onPreviousPendingQuestion,
@@ -275,29 +277,39 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       : null;
   const compactsBeforeSend = compactTokens !== null && !keepFullHistory;
 
-  const submitLabel = showResume
-    ? "Resume thread"
-    : isEditingQueuedMessage
+  const queuesWhileWaiting =
+    !showResume &&
+    (!isEditingQueuedMessage || isEditingPendingMessage) &&
+    (isSendBusy || isConnecting || isEnvironmentUnavailable);
+  const submitLabel = queuesWhileWaiting
+    ? isEditingPendingMessage
       ? "Update queued message"
-      : compactsBeforeSend
-        ? "Compact and send"
-        : isQueuing
-          ? "Queue message"
-          : isRunning
-            ? "Steer message"
-            : "Submit message";
-  const submitStatus = isEnvironmentUnavailable
-    ? "Environment disconnected"
-    : (sendDisabledReason ??
-      (isConnecting
-        ? "Connecting"
-        : isPreparingWorktree
-          ? "Preparing worktree"
-          : isSendBusy
-            ? isEditingQueuedMessage
-              ? "Updating queued message"
-              : "Submitting message"
-            : null));
+      : "Queue message"
+    : showResume
+      ? "Resume thread"
+      : isEditingQueuedMessage
+        ? "Update queued message"
+        : compactsBeforeSend
+          ? "Compact and send"
+          : isQueuing
+            ? "Queue message"
+            : isRunning
+              ? "Steer message"
+              : "Submit message";
+  const submitStatus = queuesWhileWaiting
+    ? null
+    : isEnvironmentUnavailable
+      ? "Environment disconnected"
+      : (sendDisabledReason ??
+        (isConnecting
+          ? "Connecting"
+          : isPreparingWorktree
+            ? "Preparing worktree"
+            : isSendBusy
+              ? isEditingQueuedMessage
+                ? "Updating queued message"
+                : "Submitting message"
+              : null));
   const submitTooltip =
     submitStatus ??
     (compactsBeforeSend
@@ -318,10 +330,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       {...pointerFocusProps}
       onClick={showResume ? onResume : onSubmitMessage}
       disabled={
-        isSendBusy ||
+        ((!queuesWhileWaiting || (isEditingQueuedMessage && !isEditingPendingMessage)) &&
+          (isSendBusy || isConnecting || isEnvironmentUnavailable)) ||
         isSendDisabled ||
-        isConnecting ||
-        isEnvironmentUnavailable ||
         (!hasSendableContent && !showResume)
       }
       aria-label={submitStatus ?? submitLabel}
@@ -331,7 +342,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           <StageBackdropButtonArt variant={stageBackdropVariant} />
         </span>
       ) : null}
-      {isConnecting || isSendBusy ? (
+      {!queuesWhileWaiting && (isConnecting || isSendBusy) ? (
         <Spinner size="sm" aria-hidden="true" />
       ) : showResume ? (
         <PlayIcon className="size-4 fill-current" aria-hidden="true" />

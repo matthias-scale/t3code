@@ -479,6 +479,7 @@ export interface ChatComposerProps {
   onPageScrollRelease: () => void;
 
   queuedRunsControl?: ReactNode;
+  isEditingPendingMessage?: boolean;
   editingQueuedAttachments: ReadonlyArray<{
     readonly attachment: ContractChatAttachment;
     readonly url: string | null;
@@ -988,6 +989,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const sendDisabledReason =
     externalSendDisabledReason ??
+    (projectSelectionRequired ? "Choose a project first." : null) ??
+    (noProviderAvailable ? "Set up a provider first." : null) ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
     (activePendingProgress
       ? attachmentBlockReason
@@ -1305,13 +1308,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showResumeAction =
     canResume && !composerDraftHasUserContent(composerDraft) && !isEditingQueuedMessage;
   const collapsedComposerPrimaryActionDisabled =
-    phase === "running" ||
-    isSendBusy ||
     isSendDisabled ||
-    isConnecting ||
     noProviderAvailable ||
     projectSelectionRequired ||
-    environmentUnavailable !== null ||
     (!composerSendState.hasSendableContent && !showResumeAction);
   const collapsedComposerPrimaryActionLabel = showResumeAction
     ? "Resume thread"
@@ -3841,11 +3840,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       isSendBusy={isSendBusy}
                       sendDisabledReason={sendDisabledReason}
                       isConnecting={isConnecting}
-                      isEnvironmentUnavailable={
-                        environmentUnavailable !== null ||
-                        noProviderAvailable ||
-                        projectSelectionRequired
-                      }
+                      isEnvironmentUnavailable={environmentUnavailable !== null}
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
@@ -3934,16 +3929,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isSendBusy={isSendBusy}
                     sendDisabledReason={sendDisabledReason}
                     isConnecting={isConnecting}
-                    isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
-                      noProviderAvailable ||
-                      projectSelectionRequired
-                    }
+                    isEnvironmentUnavailable={environmentUnavailable !== null}
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     canResume={showResumeAction}
                     preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
                     isEditingQueuedMessage={isEditingQueuedMessage}
+                    isEditingPendingMessage={props.isEditingPendingMessage ?? false}
                     onSubmitMessage={handleSubmitMessageStable}
                     onResume={onResume}
                     onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}

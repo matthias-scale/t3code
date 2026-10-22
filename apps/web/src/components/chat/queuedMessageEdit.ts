@@ -1,3 +1,6 @@
+import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
+import { snapshotComposerSend, type ComposerSendContents } from "../ChatView.logic";
+import type { PendingSend } from "./pendingSends";
 import type { ChatAttachment } from "@t3tools/contracts";
 import {
   composerDraftHasUserContent,
@@ -49,4 +52,31 @@ export async function prepareQueuedEditAttachments(input: {
     })),
   );
   return [...input.existingAttachments, ...images, ...files];
+}
+
+export function preparePendingSendEdit(
+  value: PendingSend,
+  content: Omit<ComposerSendContents, "sendableTerminalContexts">,
+): PendingSend {
+  const snapshot = snapshotComposerSend({
+    ...content,
+    sendableTerminalContexts: content.terminalContexts,
+  });
+  const original = value.snapshot.messageText;
+  const prefix =
+    original && value.input.message.text.endsWith(original)
+      ? value.input.message.text.slice(0, -original.length)
+      : "";
+  return {
+    ...value,
+    prepared: false,
+    snapshot,
+    input: {
+      ...value.input,
+      message: {
+        ...value.input.message,
+        text: prefix + (snapshot.messageText || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT),
+      },
+    },
+  };
 }
