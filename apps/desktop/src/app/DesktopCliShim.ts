@@ -1,3 +1,4 @@
+import { DESKTOP_APP_ID, DESKTOP_RUNTIME_NAME } from "@t3tools/shared/desktopIdentity";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -10,7 +11,15 @@ import { makeComponentLogger } from "./DesktopObservability.ts";
 // AppImage itself instead of pointing into it.
 const { logInfo, logWarning } = makeComponentLogger("desktop-cli-shim");
 
-export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
+/**
+ * Keyed by app id so this fork and upstream T3 Code, installed side by side,
+ * each claim only their own launcher and PATH link. It must never contain
+ * LEGACY_MARKER, which upstream still matches on.
+ */
+export const MARKER = `Written by ${DESKTOP_RUNTIME_NAME} (${DESKTOP_APP_ID}): runs the desktop app's bundled t3 CLI.`;
+
+/** The marker shared with upstream; only trusted in this app's own T3 home. */
+const LEGACY_MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
 
 const SERVER_ENTRY = "apps/server/dist/bin.mjs";
 
@@ -150,7 +159,11 @@ export const install = Effect.gen(function* () {
 
   return yield* Effect.gen(function* () {
     const existing = yield* fs.readFileString(shimPath).pipe(Effect.option);
-    if (Option.isSome(existing) && !existing.value.includes(MARKER)) {
+    if (
+      Option.isSome(existing) &&
+      !existing.value.includes(MARKER) &&
+      !existing.value.includes(LEGACY_MARKER)
+    ) {
       yield* logWarning("leaving a t3 launcher the app did not write", { shimPath });
       return Option.none<string>();
     }
