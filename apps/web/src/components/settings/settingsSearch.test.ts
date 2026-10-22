@@ -172,7 +172,7 @@ describe("searchSettings", () => {
       "wsl-backend",
       "auto-settle-inactive-threads",
       "auto-settle-merged-threads",
-      "days-before-auto-settle",
+      "inactivity-before-auto-settle",
     ]);
     expect(available.map((item) => item.id).filter((id) => gatedIds.has(id))).toEqual([]);
   });
@@ -212,7 +212,7 @@ describe("searchSettings", () => {
     expect(searchSettings("auto-settle", available).map((item) => item.id)).toEqual([
       "auto-settle-inactive-threads",
       "auto-settle-merged-threads",
-      "days-before-auto-settle",
+      "inactivity-before-auto-settle",
     ]);
   });
 
@@ -343,7 +343,7 @@ describe("settings search targets", () => {
   it.each([
     "auto-settle-inactive-threads",
     "auto-settle-merged-threads",
-    "days-before-auto-settle",
+    "inactivity-before-auto-settle",
   ])("retains the capability requirement for %s", (targetId) => {
     expect(getSettingsSearchTargetScope(targetId)).toMatchObject({
       scope: "project-defaults",
@@ -431,7 +431,7 @@ describe("auto-settlement search availability", () => {
     expect(searchSettings("auto-settle", items).map((item) => item.id)).toEqual([
       "auto-settle-inactive-threads",
       "auto-settle-merged-threads",
-      "days-before-auto-settle",
+      "inactivity-before-auto-settle",
     ]);
   });
 

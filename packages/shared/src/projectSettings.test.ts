@@ -41,17 +41,17 @@ describe("resolveProjectSettings", () => {
   it("applies overrides per key and reports their source", () => {
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       defaultAutoPull: true,
-      sidebarAutoSettleAfterDays: 3,
+      sidebarAutoSettleAfterHours: 3,
       projectSettingsOverrides: {
-        [projectId]: { defaultAutoPull: false, sidebarAutoSettleAfterDays: null },
+        [projectId]: { defaultAutoPull: false, sidebarAutoSettleAfterHours: null },
       },
     });
     const resolved = resolveProjectSettings(settings, projectId);
     expect(resolved.settings.defaultAutoPull).toBe(false);
-    expect(resolved.settings.sidebarAutoSettleAfterDays).toBeNull();
+    expect(resolved.settings.sidebarAutoSettleAfterHours).toBeNull();
     expect(resolved.settings.defaultThreadEnvMode).toBe(settings.defaultThreadEnvMode);
     expect(resolved.sources.defaultAutoPull).toBe("project");
-    expect(resolved.sources.sidebarAutoSettleAfterDays).toBe("project");
+    expect(resolved.sources.sidebarAutoSettleAfterHours).toBe("project");
     expect(resolved.sources.defaultThreadEnvMode).toBe("environment");
     expect(resolveProjectSettings(settings, otherProjectId).settings.defaultAutoPull).toBe(true);
   });

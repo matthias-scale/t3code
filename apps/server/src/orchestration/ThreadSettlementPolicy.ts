@@ -8,7 +8,7 @@ export interface SettlementPullRequest {
   readonly updatedAt?: string | null;
 }
 
-const DAY_MS = 24 * 60 * 60 * 1_000;
+const HOUR_MS = 60 * 60 * 1_000;
 const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
 function latestTimestamp(values: ReadonlyArray<string | null | undefined>): string | null {
@@ -70,7 +70,7 @@ export function resolveAutoSettlementAt(input: {
   readonly thread: OrchestrationThreadShell;
   readonly pullRequest: SettlementPullRequest | null;
   readonly now: string;
-  readonly autoSettleAfterDays: number | null;
+  readonly autoSettleAfterHours: number | null;
   readonly autoSettleOnMerge: boolean;
 }): string | null {
   const { thread } = input;
@@ -99,6 +99,7 @@ export function resolveAutoSettlementAt(input: {
   if (!isAutoSettlementCandidate(thread, input.now)) return null;
   const activityAt = latestTimestamp([
     thread.latestUserMessageAt,
+    thread.latestImportedMessageAt,
     thread.latestTurn?.requestedAt,
     thread.latestTurn?.startedAt,
     thread.latestTurn?.completedAt,
@@ -108,8 +109,8 @@ export function resolveAutoSettlementAt(input: {
       return activityAt ?? thread.createdAt;
     }
   }
-  if (input.autoSettleAfterDays === null || activityAt === null) return null;
-  return Date.parse(activityAt) < Date.parse(input.now) - input.autoSettleAfterDays * DAY_MS
+  if (input.autoSettleAfterHours === null || activityAt === null) return null;
+  return Date.parse(activityAt) < Date.parse(input.now) - input.autoSettleAfterHours * HOUR_MS
     ? activityAt
     : null;
 }

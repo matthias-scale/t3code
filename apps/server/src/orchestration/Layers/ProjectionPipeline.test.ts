@@ -177,7 +177,17 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-import-shell-")
         FROM projection_threads
         WHERE thread_id = ${threadId}
       `;
+        const readLatestImportedMessageAt = sql<{
+          readonly latestImportedMessageAt: string | null;
+        }>`
+        SELECT latest_imported_message_at AS "latestImportedMessageAt"
+        FROM projection_threads
+        WHERE thread_id = ${threadId}
+      `;
         assert.deepEqual(yield* readLatestUserMessageAt, [{ latestUserMessageAt: null }]);
+        assert.deepEqual(yield* readLatestImportedMessageAt, [
+          { latestImportedMessageAt: createdAt },
+        ]);
 
         const sessionEvent = yield* eventStore.append({
           type: "thread.session-set",
@@ -205,6 +215,9 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-import-shell-")
         });
         yield* projectionPipeline.projectEvent(sessionEvent);
         assert.deepEqual(yield* readLatestUserMessageAt, [{ latestUserMessageAt: null }]);
+        assert.deepEqual(yield* readLatestImportedMessageAt, [
+          { latestImportedMessageAt: createdAt },
+        ]);
       }),
     );
   },

@@ -39,13 +39,13 @@ const makeThread = (
 const decide = (
   thread: OrchestrationThreadShell,
   pullRequest: SettlementPullRequest | null = null,
-  settings: { days?: number | null; merge?: boolean } = {},
+  settings: { hours?: number | null; merge?: boolean } = {},
 ) =>
   resolveAutoSettlementAt({
     thread,
     pullRequest,
     now: NOW,
-    autoSettleAfterDays: settings.days === undefined ? 3 : settings.days,
+    autoSettleAfterHours: settings.hours === undefined ? 3 : settings.hours,
     autoSettleOnMerge: settings.merge ?? true,
   }) !== null;
 
@@ -65,7 +65,7 @@ describe("resolveAutoSettlementAt", () => {
         }),
         pullRequest: null,
         now: NOW,
-        autoSettleAfterDays: 3,
+        autoSettleAfterHours: 3,
         autoSettleOnMerge: true,
       }),
     ).toBe("2026-08-21T00:00:00.000Z");
@@ -81,7 +81,7 @@ describe("resolveAutoSettlementAt", () => {
         }),
         pullRequest: { state: "closed", closedAt: NOW },
         now: NOW,
-        autoSettleAfterDays: null,
+        autoSettleAfterHours: null,
         autoSettleOnMerge: true,
       }),
     ).toBe("2026-08-01T00:00:00.000Z");
@@ -90,11 +90,11 @@ describe("resolveAutoSettlementAt", () => {
   it("settles inactive threads and leaves never-used threads active", () => {
     expect(decide(makeThread())).toBe(true);
     expect(decide(makeThread({ latestUserMessageAt: null }))).toBe(false);
-    expect(decide(makeThread(), null, { days: null })).toBe(false);
+    expect(decide(makeThread(), null, { hours: null })).toBe(false);
   });
 
   it("keeps a thread active at the exact inactivity boundary", () => {
-    expect(decide(makeThread({ latestUserMessageAt: "2026-08-25T12:00:00.000Z" }))).toBe(false);
+    expect(decide(makeThread({ latestUserMessageAt: "2026-08-28T09:00:00.000Z" }))).toBe(false);
   });
 
   it("settles inactive threads with open pull requests", () => {
@@ -105,7 +105,7 @@ describe("resolveAutoSettlementAt", () => {
     expect(decide(makeThread(), { state: "closed", closedAt: NOW }, { merge: false })).toBe(true);
     expect(decide(makeThread(), { state: "merged", mergedAt: NOW }, { merge: false })).toBe(true);
     expect(
-      decide(makeThread(), { state: "merged", mergedAt: NOW }, { merge: false, days: null }),
+      decide(makeThread(), { state: "merged", mergedAt: NOW }, { merge: false, hours: null }),
     ).toBe(false);
   });
 
@@ -114,7 +114,7 @@ describe("resolveAutoSettlementAt", () => {
       decide(
         makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" }),
         { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" },
-        { days: null },
+        { hours: null },
       ),
     ).toBe(false);
   });
@@ -131,10 +131,10 @@ describe("resolveAutoSettlementAt", () => {
             mergedAt: "2026-08-26T00:00:00.000Z",
             updatedAt: NOW,
           },
-          { days: null },
+          { hours: null },
         ),
       ).toBe(false);
-      expect(decide(makeThread(), { state, updatedAt: NOW }, { days: null })).toBe(false);
+      expect(decide(makeThread(), { state, updatedAt: NOW }, { hours: null })).toBe(false);
     },
   );
 
@@ -143,13 +143,13 @@ describe("resolveAutoSettlementAt", () => {
       decide(
         makeThread({ createdAt: "2026-08-20T00:00:00.000Z", latestUserMessageAt: null }),
         { state: "closed", closedAt: "2026-08-19T00:00:00.000Z" },
-        { days: null },
+        { hours: null },
       ),
     ).toBe(false);
   });
 
   it("requires a comparable PR timestamp for immediate settlement", () => {
-    const recentThread = makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" });
+    const recentThread = makeThread({ latestUserMessageAt: "2026-08-28T11:00:00.000Z" });
     expect(decide(recentThread, { state: "closed", closedAt: null })).toBe(false);
     expect(decide(recentThread, { state: "merged", mergedAt: "unknown" })).toBe(false);
     expect(decide(makeThread(), { state: "closed", closedAt: null })).toBe(true);
@@ -166,7 +166,9 @@ describe("resolveAutoSettlementAt", () => {
         assistantMessageId: null,
       },
     });
-    expect(decide(thread, { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" })).toBe(true);
+    expect(
+      decide(thread, { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" }, { hours: null }),
+    ).toBe(true);
   });
 
   it("blocks pins, snooze, pending work, live sessions, and queued starts", () => {
@@ -254,9 +256,9 @@ describe("linked request settlement", () => {
     (state) => {
       const old = linkedRequest(1, terminalSnapshot(state, "2026-08-19T00:00:00.000Z", NOW));
       const recent = linkedRequest(2, terminalSnapshot(state, "2026-08-21T00:00:00.000Z"));
-      expect(decide(makeThread({ pullRequests: [old, recent] }), null, { days: null })).toBe(true);
-      expect(decide(makeThread({ pullRequests: [recent, old] }), null, { days: null })).toBe(true);
-      expect(decide(makeThread({ pullRequests: [old] }), null, { days: null })).toBe(false);
+      expect(decide(makeThread({ pullRequests: [old, recent] }), null, { hours: null })).toBe(true);
+      expect(decide(makeThread({ pullRequests: [recent, old] }), null, { hours: null })).toBe(true);
+      expect(decide(makeThread({ pullRequests: [old] }), null, { hours: null })).toBe(false);
     },
   );
 
@@ -277,12 +279,12 @@ describe("linked request settlement", () => {
 
   it("honors merge settings and ignores missing terminal timestamps", () => {
     const merged = linkedRequest(1, terminalSnapshot("merged", NOW));
-    expect(decide(makeThread({ pullRequests: [merged] }), null, { days: null, merge: false })).toBe(
-      false,
-    );
+    expect(
+      decide(makeThread({ pullRequests: [merged] }), null, { hours: null, merge: false }),
+    ).toBe(false);
     const missing = linkedRequest(2, { ...terminalSnapshot("merged", NOW), mergedAt: null });
-    expect(decide(makeThread({ pullRequests: [missing] }), null, { days: null })).toBe(false);
-    expect(decide(makeThread({ pullRequests: [missing, merged] }), null, { days: null })).toBe(
+    expect(decide(makeThread({ pullRequests: [missing] }), null, { hours: null })).toBe(false);
+    expect(decide(makeThread({ pullRequests: [missing, merged] }), null, { hours: null })).toBe(
       true,
     );
   });

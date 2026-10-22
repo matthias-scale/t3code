@@ -1,18 +1,18 @@
 import {
-  MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-  MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
+  MAX_SIDEBAR_AUTO_SETTLE_AFTER_HOURS,
+  MIN_SIDEBAR_AUTO_SETTLE_AFTER_HOURS,
 } from "@t3tools/contracts";
 import { View } from "react-native";
 
 import { AppText } from "../../../components/AppText";
 import { MaterialIconButton } from "../../../components/MaterialIconButton";
-import type { AutoSettleDaysFieldProps } from "./AutoSettleDaysField";
+import type { AutoSettleHoursFieldProps } from "./AutoSettleHoursField";
 
-export function AutoSettleDaysField(props: AutoSettleDaysFieldProps) {
+export function AutoSettleHoursField(props: AutoSettleHoursFieldProps) {
   const adjust = (amount: number) => {
     const next = Math.max(
-      MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-      Math.min(MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS, props.value + amount),
+      MIN_SIDEBAR_AUTO_SETTLE_AFTER_HOURS,
+      Math.min(MAX_SIDEBAR_AUTO_SETTLE_AFTER_HOURS, props.value + amount),
     );
     if (next !== props.value) props.onValueChange(next);
   };
@@ -27,22 +27,22 @@ export function AutoSettleDaysField(props: AutoSettleDaysFieldProps) {
       />
       <MaterialIconButton
         icon="minus"
-        accessibilityLabel="Decrease days before auto-settle"
-        disabled={props.value <= MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS}
+        accessibilityLabel="Decrease hours before auto-settle"
+        disabled={props.value <= MIN_SIDEBAR_AUTO_SETTLE_AFTER_HOURS}
         onPress={() => adjust(-1)}
       />
       <AppText
         className="min-w-8 text-center text-base"
         style={{ fontVariant: ["tabular-nums"] }}
-        accessibilityLabel={`${props.value} ${props.value === 1 ? "day" : "days"} before auto-settle`}
+        accessibilityLabel={`${props.value} ${props.value === 1 ? "hour" : "hours"} before auto-settle`}
         accessibilityLiveRegion="polite"
       >
         {props.value}
       </AppText>
       <MaterialIconButton
         icon="plus"
-        accessibilityLabel="Increase days before auto-settle"
-        disabled={props.value >= MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS}
+        accessibilityLabel="Increase hours before auto-settle"
+        disabled={props.value >= MAX_SIDEBAR_AUTO_SETTLE_AFTER_HOURS}
         onPress={() => adjust(1)}
       />
     </View>

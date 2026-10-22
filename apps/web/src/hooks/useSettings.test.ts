@@ -399,18 +399,18 @@ describe("mergeEnvironmentSettings", () => {
   it("keeps server settlement settings when legacy client data contains retired keys", () => {
     const serverSettings = {
       ...DEFAULT_SERVER_SETTINGS,
-      sidebarAutoSettleAfterDays: 14,
+      sidebarAutoSettleAfterHours: 14,
       sidebarAutoSettleOnMerge: false,
     };
     const legacyClientSettings = {
       ...DEFAULT_CLIENT_SETTINGS,
-      sidebarAutoSettleAfterDays: 1,
+      sidebarAutoSettleAfterHours: 1,
       sidebarAutoSettleOnMerge: true,
     };
 
     const settings = mergeEnvironmentSettings(serverSettings, legacyClientSettings);
 
-    expect(settings.sidebarAutoSettleAfterDays).toBe(14);
+    expect(settings.sidebarAutoSettleAfterHours).toBe(14);
     expect(settings.sidebarAutoSettleOnMerge).toBe(false);
   });
 });

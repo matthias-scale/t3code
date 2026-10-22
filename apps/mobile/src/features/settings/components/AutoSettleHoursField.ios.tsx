@@ -10,24 +10,18 @@ import {
   presentationBackground,
   tag,
 } from "@expo/ui/swift-ui/modifiers";
-import {
-  MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-  MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
-} from "@t3tools/contracts";
 import { useState } from "react";
 
 import { useAppearancePreferences } from "../appearance/AppearancePreferencesProvider";
-import type { AutoSettleDaysFieldProps } from "./AutoSettleDaysField";
+import type { AutoSettleHoursFieldProps } from "./AutoSettleHoursField";
 
-const days = Array.from(
-  { length: MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS - MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS + 1 },
-  (_, index) => MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS + index,
-);
+const commonHours = [4, 12, 24, 72, 168, 720, 2160] as const;
 
-export function AutoSettleDaysField(props: AutoSettleDaysFieldProps) {
+export function AutoSettleHoursField(props: AutoSettleHoursFieldProps) {
   const { themeAppearance, themeVariables: colors, appearance } = useAppearancePreferences();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(props.value);
+  const hours = [...new Set([props.value, ...commonHours])].sort((left, right) => left - right);
   return (
     <Host matchContents colorScheme={themeAppearance} seedColor={colors["--color-primary"]}>
       <Popover isPresented={open} onIsPresentedChange={setOpen}>
@@ -39,7 +33,7 @@ export function AutoSettleDaysField(props: AutoSettleDaysFieldProps) {
             }}
             modifiers={[
               buttonStyle("bordered"),
-              accessibilityLabel(`Days before auto-settle: ${props.value}`),
+              accessibilityLabel(`Hours before auto-settle: ${props.value}`),
               frame({ minWidth: 64, minHeight: 44 }),
               foregroundStyle(colors["--color-primary"]),
               font({ size: appearance.baseFontSize }),
@@ -57,17 +51,17 @@ export function AutoSettleDaysField(props: AutoSettleDaysFieldProps) {
             ]}
           >
             <Picker
-              label="Days before auto-settle"
+              label="Hours before auto-settle"
               selection={draft}
               onSelectionChange={setDraft}
               modifiers={[pickerStyle("wheel"), frame({ height: 180 })]}
             >
-              {days.map((value) => (
+              {hours.map((value) => (
                 <Text
                   key={value}
                   modifiers={[tag(value), foregroundStyle(colors["--color-foreground"])]}
                 >
-                  {`${value} ${value === 1 ? "day" : "days"}`}
+                  {`${value} ${value === 1 ? "hour" : "hours"}`}
                 </Text>
               ))}
             </Picker>
