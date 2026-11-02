@@ -12,6 +12,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
@@ -383,6 +384,10 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
                 }
               : DEFAULT_SERVER_SETTINGS,
           }),
+        ),
+        Effect.provideService(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({ readFileString: () => Effect.succeed("{}") }),
         ),
         Effect.provideService(HttpClient.HttpClient, server),
         Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtime),
