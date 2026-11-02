@@ -1,5 +1,9 @@
 import {
   CHATGPT_USAGE_URL,
+  accountsWithRoom,
+  limitsNotice,
+  limitWindowLabel,
+  paceOf,
   collectLimitAccounts,
   collectExternalUsageLinks,
   collectLimitNotices,
@@ -7,6 +11,7 @@ import {
   cursorUsageWindowDetails,
   displayLimitWindows,
   formatResetsIn,
+  formatDuration,
   type LimitAccount,
   type LimitPool,
   type LimitPoolMember,
@@ -541,25 +546,24 @@ function PoolWindowCard({
   readonly label?: string | undefined;
   readonly description?: string | undefined;
 }) {
-  const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
+  const member = pool.members[0];
+  const pace = member ? paceOf(member.window, now) : null;
   return (
     <div className="grid items-center gap-x-6 gap-y-3 rounded-lg border border-border/60 p-4 md:grid-cols-[11rem_minmax(0,1fr)]">
       <div className="flex flex-col gap-1">
         <span className="text-sm font-medium text-foreground">{label ?? pool.label}</span>
         <span className="flex items-baseline gap-2">
           <span className="text-3xl font-semibold text-foreground tabular-nums">
-            {pool.remainingPercent}%
+            {member ? `${remainingPercent(member.window)}%` : "unavailable"}
           </span>
           <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
             <span>left</span>
-            {pool.pace ? <PaceIcon pace={pool.pace} /> : null}
+            {pace ? <PaceIcon pace={pace} /> : null}
           </span>
         </span>
-        {nextRefill && pool.columns.length > 1 ? (
-          <span className="text-xs font-medium text-foreground tabular-nums">
-            ↻ +{nextRefill.restoresPercent}%
-          </span>
-        ) : null}
+        <span className="text-xs text-muted-foreground">
+          {(member && formatResetsIn(member.window, now)) || "no reset info"}
+        </span>
       </div>
       <PoolBar pool={pool} color={color} now={now} />
       {description ? (
@@ -585,19 +589,43 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
         />
         {label}
       </h2>
-      {windows.map((window) => {
-        const details = pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
-        return (
-          <PoolWindowCard
-            key={`${window.kind}:${window.id}`}
-            pool={window}
-            color={color}
-            now={now}
-            label={details?.label}
-            description={details?.description}
-          />
-        );
-      })}
+      <p className="text-xs text-muted-foreground">
+        pool · {pool.accounts.length} accounts · {accountsWithRoom(pool)} have room
+      </p>
+      {pool.accounts.map((account) => (
+        <div key={account.key} className="flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <AccountName account={account} />
+            <span className="text-xs text-muted-foreground">
+              {account.plan} · read{" "}
+              {formatDuration(Math.max(0, now - Date.parse(account.limits.checkedAt)))} ago
+              {account.sourceLabel ? ` · ${account.sourceLabel}` : ""}
+            </span>
+          </div>
+          {limitsNotice(account.limits) ? (
+            <p className="text-sm text-muted-foreground">{limitsNotice(account.limits)}</p>
+          ) : null}
+          {windows.map((window) => {
+            const column = window.columns.find((column) => column.account.key === account.key);
+            const details =
+              pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
+            return column?.window ? (
+              <PoolWindowCard
+                key={`${window.kind}:${window.id}`}
+                pool={{ ...window, members: [column], columns: [column] }}
+                color={color}
+                now={now}
+                label={limitWindowLabel(pool.driver, column.window)}
+                description={details?.description}
+              />
+            ) : (
+              <p key={`${window.kind}:${window.id}`} className="text-xs text-muted-foreground">
+                {window.label}: unavailable
+              </p>
+            );
+          })}
+        </div>
+      ))}
     </section>
   );
 }

@@ -326,7 +326,19 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
-      if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
+      if (!provider.usageLimits || provider.usageLimits.unavailable?.reason === "unsupported")
+        continue;
+      const unknownPool =
+        /(?:^|[ _-])pool(?:$|[ _-])/i.test(
+          `${provider.instanceId} ${provider.displayName ?? ""}`,
+        ) && !resolveKey(nativeReport(provider));
+      if (
+        unknownPool &&
+        presentation.serverConfig?.usageLimitSources?.some((source) =>
+          source.accounts.some((account) => account.driver === provider.driver),
+        )
+      )
+        continue;
       merge(resolveKey(nativeReport(provider)) ?? `${environmentId}:${provider.instanceId}`, {
         key: `${environmentId}:${provider.instanceId}`,
         driver: provider.driver,
@@ -335,7 +347,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         plan: provider.auth.label,
         accentColor: provider.accentColor,
         environments: [{ environmentId, label }],
-        sourceLabel: null,
+        sourceLabel: unknownPool ? "via pool, account unknown" : null,
         redeem: { environmentId, input: { instanceId: provider.instanceId } },
         limits: provider.usageLimits,
       });
@@ -348,7 +360,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         ? `${presentation.entry.target.label} · ${source.label}`
         : source.label;
       for (const account of source.accounts) {
-        if (limitsNotice(account.usageLimits) !== null) continue;
+        if (account.usageLimits.unavailable?.reason === "unsupported") continue;
         const key = `${source.id}:${account.id}${account.workspaceId ? `:${account.workspaceId}` : ""}`;
         merge(resolveKey(account) ?? key, {
           key,
@@ -414,9 +426,7 @@ export interface LimitPoolWindow {
   readonly columns: ReadonlyArray<
     LimitPoolMember | { readonly account: LimitAccount; readonly window: null }
   >;
-  readonly remainingPercent: number;
-  readonly usedPercent: number;
-  readonly pace: LimitPace | null;
+  readonly accountsWithRoom: number;
   readonly resets: ReadonlyArray<{
     readonly member: LimitPoolMember;
     readonly at: number;
@@ -488,6 +498,23 @@ export function collectLimitPools(
     );
     return { driver, accounts: sorted, windows: poolWindows(sorted, now) };
   });
+}
+
+export function accountsWithRoom(pool: LimitPool): number {
+  return pool.accounts.filter(
+    (account) =>
+      !limitsNotice(account.limits) &&
+      account.limits.windows.every((window) => window.usedPercent < 100),
+  ).length;
+}
+
+export function limitWindowLabel(
+  driver: LimitPool["driver"],
+  window: ServerProviderUsageWindow,
+): string {
+  return driver === "antigravity" && window.id.startsWith("3p-")
+    ? `Antigravity · Claude & GPT models · ${window.kind === "weekly" ? "Weekly" : "5-hour"}`
+    : window.label;
 }
 
 function accountSortName(account: LimitAccount): string {
@@ -562,15 +589,6 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
     const memberByAccount = new Map(members.map((member) => [member.account.key, member]));
     const first = members[0]!.window;
     const id = members[0]!.account.driver === "codex" ? key : first.id;
-    const usedPercent = members.reduce((sum, m) => sum + m.window.usedPercent, 0) / members.length;
-    // Judge pace only for windows with reset clocks; others add spend without elapsed time.
-    const timed = members.flatMap((m) => {
-      const share = elapsedShare(m.window, now);
-      return share === null ? [] : [{ used: m.window.usedPercent, elapsed: share }];
-    });
-    const timedUsed = timed.reduce((sum, t) => sum + t.used, 0) / timed.length;
-    const meanElapsed =
-      timed.length > 0 ? timed.reduce((sum, t) => sum + t.elapsed, 0) / timed.length : null;
     const resets = members
       .flatMap((member) => {
         const at = resetMillis(member.window);
@@ -580,7 +598,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
               {
                 member,
                 at,
-                restoresPercent: Math.round(member.refillPercent / members.length),
+                restoresPercent: Math.round(member.refillPercent),
               },
             ];
       })
@@ -593,9 +611,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
       columns: accounts.map(
         (account) => memberByAccount.get(account.key) ?? { account, window: null },
       ),
-      usedPercent: Math.round(usedPercent),
-      remainingPercent: Math.round(100 - usedPercent),
-      pace: meanElapsed === null ? null : paceOfShares(timedUsed, meanElapsed),
+      accountsWithRoom: members.filter((member) => member.window.usedPercent < 100).length,
       resets,
     };
   });

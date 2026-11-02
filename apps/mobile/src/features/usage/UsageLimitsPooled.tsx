@@ -1,9 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type UsageProviderKind } from "@t3tools/contracts";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
 import {
   collectLimitAccounts,
+  accountsWithRoom,
+  limitsNotice,
+  limitWindowLabel,
+  formatDuration,
+  paceOf,
   collectExternalUsageLinks,
   collectLimitNotices,
   collectLimitPools,
@@ -188,6 +193,8 @@ function PoolWindowCard({
   const inlineReset = wide && segmentWidth >= 150;
   const inlineName = wide && segmentWidth >= 220;
   const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
+  const member = pool.members[0];
+  const pace = member ? paceOf(member.window, now) : null;
   const openAccount = (account: LimitAccount) =>
     navigation.navigate("SettingsUsageAccount", {
       accountKey: account.key,
@@ -203,16 +210,17 @@ function PoolWindowCard({
           <Text className="text-sm font-t3-medium text-foreground">{label ?? pool.label}</Text>
           <View className="flex-row items-baseline gap-1.5">
             <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
-              {pool.remainingPercent}%
+              {member ? `${remainingPercent(member.window)}%` : "unavailable"}
             </Text>
             <Text className="text-sm text-foreground-muted">left</Text>
           </View>
         </View>
-        {pool.pace ? (
-          <Text className="text-xs text-foreground-tertiary">{PACE_LABEL[pool.pace]}</Text>
-        ) : null}
+        {pace ? <Text className="text-xs text-foreground-tertiary">{PACE_LABEL[pace]}</Text> : null}
       </View>
       {description ? <Text className="text-xs text-foreground-muted">{description}</Text> : null}
+      <Text className="text-xs text-foreground-muted">
+        {(member && formatResetsIn(member.window, now)) || "no reset info"}
+      </Text>
       {nextRefill ? (
         <Text className="text-xs tabular-nums text-foreground-muted">
           ↻ +{nextRefill.restoresPercent}%{" "}
@@ -408,20 +416,48 @@ export function UsageLimitsSection({
   now,
   failedLabels,
   selectedEnvironmentIds,
+  hiddenProviders,
   cursorPrompt,
   wide = false,
 }: {
   readonly now: number;
   readonly failedLabels: readonly string[];
   readonly selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
+  readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
   readonly cursorPrompt?: ReactNode;
   readonly wide?: boolean;
 }) {
   const presentations = useAtomValue(environmentPresentations.presentationsWithProvidersAtom);
-  const selected =
-    selectedEnvironmentIds === null
-      ? presentations
-      : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
+  const selected = new Map(
+    [...presentations].flatMap(([id, presentation]) => {
+      if (selectedEnvironmentIds !== null && !selectedEnvironmentIds.has(id)) return [];
+      const config = presentation.serverConfig;
+      const isVisible = (driver: Parameters<typeof usageProviderKind>[0]) => {
+        const kind = usageProviderKind(driver);
+        return kind === null || !hiddenProviders.has(kind);
+      };
+      return [
+        [
+          id,
+          config === null
+            ? presentation
+            : {
+                ...presentation,
+                serverConfig: {
+                  ...config,
+                  providers: config.providers.filter((provider) => isVisible(provider.driver)),
+                  usageLimitSources: config.usageLimitSources?.flatMap((source) => {
+                    const accounts = source.accounts.filter((account) => isVisible(account.driver));
+                    return accounts.length === 0 && source.accounts.length > 0
+                      ? []
+                      : [{ ...source, accounts }];
+                  }),
+                },
+              },
+        ] as const,
+      ];
+    }),
+  );
   const pools = collectLimitPools(collectLimitAccounts(selected), now);
   const notices = collectLimitNotices(selected);
   const externalLinks = collectExternalUsageLinks(selected);
@@ -456,24 +492,53 @@ export function UsageLimitsSection({
                   {DRIVER_LABEL[pool.driver] ?? pool.driver}
                 </Text>
               </View>
-              {windows.map((window) => {
-                const details =
-                  pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
-                return (
-                  <PoolWindowCard
-                    key={`${window.kind}:${window.id}`}
-                    pool={window}
-                    color={colors[usageProviderKind(pool.driver) ?? "codex"]}
-                    now={now}
-                    environmentIds={
-                      selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds]
-                    }
-                    label={details?.label}
-                    description={details?.description}
-                    wide={wide}
-                  />
-                );
-              })}
+              <Text className="text-xs text-foreground-muted">
+                pool · {pool.accounts.length} accounts · {accountsWithRoom(pool)} have room
+              </Text>
+              {pool.accounts.map((account) => (
+                <View key={account.key} className="gap-2">
+                  <Text className="text-sm font-t3-medium text-foreground">
+                    {accountName(account)} · {account.plan}
+                  </Text>
+                  <Text className="text-xs text-foreground-muted">
+                    read {formatDuration(Math.max(0, now - Date.parse(account.limits.checkedAt)))}{" "}
+                    ago{account.sourceLabel ? ` · ${account.sourceLabel}` : ""}
+                  </Text>
+                  {limitsNotice(account.limits) ? (
+                    <Text className="text-sm text-foreground-muted">
+                      {limitsNotice(account.limits)}
+                    </Text>
+                  ) : null}
+                  {windows.map((window) => {
+                    const column = window.columns.find(
+                      (column) => column.account.key === account.key,
+                    );
+                    const details =
+                      pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
+                    return column?.window ? (
+                      <PoolWindowCard
+                        key={`${window.kind}:${window.id}`}
+                        pool={{ ...window, members: [column], columns: [column] }}
+                        color={colors[usageProviderKind(pool.driver) ?? "codex"]}
+                        now={now}
+                        environmentIds={
+                          selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds]
+                        }
+                        label={limitWindowLabel(pool.driver, column.window)}
+                        description={details?.description}
+                        wide={wide}
+                      />
+                    ) : (
+                      <Text
+                        key={`${window.kind}:${window.id}`}
+                        className="text-xs text-foreground-muted"
+                      >
+                        {window.label}: unavailable
+                      </Text>
+                    );
+                  })}
+                </View>
+              ))}
             </View>
           </Fragment>
         );

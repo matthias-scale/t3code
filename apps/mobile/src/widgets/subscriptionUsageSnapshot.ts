@@ -78,9 +78,18 @@ function subscriptionUsageProps(
           ...pool.windows.flatMap((window) => window.resets.map((reset) => reset.at)),
         );
         const fresh = Number.isFinite(expiresAt) && expiresAt > now;
-        const sortedWindows = [...pool.windows].sort(
-          (a, b) => a.remainingPercent - b.remainingPercent,
-        );
+        const sortedWindows = pool.windows
+          .flatMap((window) =>
+            window.members.map((member) => ({
+              ...window,
+              remainingPercent: Math.round(100 - member.window.usedPercent),
+              label: `${`Account ${pool.accounts.indexOf(member.account) + 1}`} · ${window.label}`,
+              resets: window.resets.filter(
+                (reset) => reset.member.account.key === member.account.key,
+              ),
+            })),
+          )
+          .sort((a, b) => a.remainingPercent - b.remainingPercent);
         const selectedWindows = [
           ...new Set([
             sortedWindows.find((window) => window.kind === "session"),
@@ -96,7 +105,7 @@ function subscriptionUsageProps(
           detail: !fresh
             ? "Open T3 to refresh"
             : pool.accounts.length > 1
-              ? `${pool.accounts.length} accounts · pooled`
+              ? `${pool.accounts.length} accounts · least remaining`
               : "Subscription remaining",
           expiresAt: fresh ? expiresAt : 0,
           totalWindows: fresh ? pool.windows.length : 0,

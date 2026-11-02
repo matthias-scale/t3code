@@ -107,6 +107,7 @@ function UsageScreen(props: {
   }));
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
+  const [hiddenProviders, setHiddenProviders] = useState<ReadonlySet<UsageProviderKind>>(new Set());
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { merged, environments, selectedEnvironments, isPending, refresh } = useUsage(
@@ -295,6 +296,31 @@ function UsageScreen(props: {
         }
       >
         <View className="w-full gap-6 self-center" style={{ maxWidth: MAX_CONTENT_WIDTH }}>
+          {showingLimits ? (
+            <Menu
+              title="Providers"
+              actions={Object.entries(PROVIDER_LABEL).map(([id, title]) => ({
+                id,
+                title,
+                state: hiddenProviders.has(id as UsageProviderKind)
+                  ? ("off" as const)
+                  : ("on" as const),
+              }))}
+              onPressAction={({ nativeEvent }) =>
+                setHiddenProviders((previous) => {
+                  const next = new Set(previous);
+                  const kind = nativeEvent.event as UsageProviderKind;
+                  if (next.has(kind)) next.delete(kind);
+                  else next.add(kind);
+                  return next;
+                })
+              }
+            >
+              <Pressable accessibilityRole="button" accessibilityLabel="Filter usage providers">
+                <Text className="text-sm text-foreground">Providers</Text>
+              </Pressable>
+            </Menu>
+          ) : null}
           {wide ? (
             <View className="flex-row items-center gap-3">
               {showingLimits ? (
@@ -335,6 +361,7 @@ function UsageScreen(props: {
                 now={limits.now}
                 failedLabels={limits.failedLabels}
                 selectedEnvironmentIds={selectedEnvironmentIds}
+                hiddenProviders={hiddenProviders}
                 wide={wide}
                 cursorPrompt={
                   cursorAccessEnvironments.length > 0 ? (
