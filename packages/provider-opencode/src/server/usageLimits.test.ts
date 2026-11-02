@@ -121,6 +121,55 @@ describe("instance plan usage", () => {
       expect(overridden.unavailable?.reason).toBe("unsupported");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+  it.effect("reads JSONC config files in OpenCode's order", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped();
+      yield* fs.makeDirectory(`${home}/opencode`);
+      yield* fs.writeFileString(
+        `${home}/opencode/opencode.json`,
+        `{
+  // comments are valid in OpenCode config
+  "model": "opencode-go/model",
+}`,
+      );
+      yield* fs.writeFileString(
+        `${home}/opencode/opencode.jsonc`,
+        `{
+  /* later file wins */
+  "model": "kimi-code/k3",
+  "provider": { "kimi-code": { "options": { "apiKey": "jsonc-fixture" } } },
+}`,
+      );
+      const result = yield* read(
+        {},
+        { usages: {} },
+        200,
+        { XDG_CONFIG_HOME: home },
+        "jsonc-fixture",
+      ).result;
+      expect(result.unavailable).toBeUndefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+  it.effect("falls back to the Go plan when no model is configured", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped();
+      const goWindow = { percent: 10, resetsAt: "2099-01-01T00:00:00Z" };
+      const result = yield* read(
+        {},
+        { usage: { rolling: goWindow, weekly: goWindow, monthly: goWindow } },
+        200,
+        { XDG_CONFIG_HOME: home },
+        "go-key",
+      ).result;
+      expect(result.windows.map((window) => window.id)).toEqual([
+        "go_rolling",
+        "go_weekly",
+        "go_monthly",
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
   it.effect("reads only the selected Kimi provider's stored credentials", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
