@@ -354,6 +354,11 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         displayName: undefined,
         environment: [
           {
+            name: "OPENCODE_CONFIG_CONTENT",
+            sensitive: false,
+            value: JSON.stringify({ model: "opencode-go/kimi-k3" }),
+          },
+          {
             name: "OPENCODE_AUTH_CONTENT",
             sensitive: true,
             value: JSON.stringify({
