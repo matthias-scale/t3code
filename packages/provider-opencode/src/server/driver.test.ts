@@ -283,6 +283,7 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
     })),
   )("Go usage recovery $name without restarting a ready catalog", (scenario) =>
     Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
       const usageStarted = yield* Deferred.make<void>();
       let usageReads = 0;
       let serverStarts = 0;
@@ -385,10 +386,10 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
               : DEFAULT_SERVER_SETTINGS,
           }),
         ),
-        Effect.provideService(
-          FileSystem.FileSystem,
-          FileSystem.makeNoop({ readFileString: () => Effect.succeed("{}") }),
-        ),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFileString: () => Effect.succeed("{}"),
+        }),
         Effect.provideService(HttpClient.HttpClient, server),
         Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtime),
       );
