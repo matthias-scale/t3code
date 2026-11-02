@@ -71,6 +71,122 @@ const readStoredApiKey = (databasePath: string, integrationId: "opencode" | "ope
     }
   }).pipe(Effect.orElseSucceed(() => undefined));
 
+const ProviderConfig = Schema.Struct({
+  model: Schema.optional(Schema.String),
+  enabled_providers: Schema.optional(Schema.Array(Schema.String)),
+  provider: Schema.optional(
+    Schema.Record(
+      Schema.String,
+      Schema.Struct({
+        options: Schema.optional(Schema.Struct({ apiKey: Schema.optional(Schema.String) })),
+      }),
+    ),
+  ),
+});
+const decodeProviderConfig = Schema.decodeEffect(Schema.fromJsonString(ProviderConfig));
+const KimiWindow = Schema.Struct({
+  used_ratio: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  reset_time: Schema.optional(Schema.NullOr(Schema.String)),
+});
+const KimiUsage = Schema.Struct({
+  usages: Schema.Struct({
+    limit_5h: Schema.optional(Schema.NullOr(KimiWindow)),
+    limit_month_total: Schema.optional(Schema.NullOr(KimiWindow)),
+  }),
+});
+
+export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(function* (input: {
+  readonly enabled: boolean;
+  readonly serverUrl: string;
+  readonly environment: NodeJS.ProcessEnv;
+}) {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const unsupported = makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" });
+  if (!input.enabled || input.serverUrl.trim()) return unsupported;
+  return yield* Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const env = input.environment;
+    const configPath =
+      env.OPENCODE_CONFIG ||
+      path.join(
+        env.XDG_CONFIG_HOME || path.join(env.HOME || (yield* HostProcess.HomeDirectory), ".config"),
+        "opencode",
+        "opencode.json",
+      );
+    const contents =
+      env.OPENCODE_CONFIG_CONTENT ??
+      (yield* fs.readFileString(configPath).pipe(
+        Effect.catchTags({
+          PlatformError: (error) =>
+            error.reason._tag === "NotFound" ? Effect.succeed("{}") : Effect.fail(error),
+        }),
+      ));
+    const config = yield* decodeProviderConfig(contents);
+    const provider =
+      config.model?.split("/")[0] ??
+      (config.enabled_providers?.length === 1 ? config.enabled_providers[0] : undefined);
+    if (provider === "opencode-go") return yield* readOpenCodeGoUsageLimits(input);
+    if (provider !== "kimi-code" && provider !== "kimi-code-plan-global") return unsupported;
+    const configuredKey = config.provider?.[provider]?.options?.apiKey;
+    const reference = configuredKey?.match(/^\{env:([^}]+)\}$/);
+    const apiKey = (reference ? env[reference[1]!] : (configuredKey ?? env.KIMI_API_KEY))?.trim();
+    if (!apiKey)
+      return makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message:
+          "Kimi Code plan key is unavailable in this instance's provider config or environment.",
+      });
+    const client = yield* HttpClient.HttpClient;
+    const response = yield* client.execute(
+      HttpClientRequest.get("https://api.kimi.com/coding/v1/usages").pipe(
+        HttpClientRequest.bearerToken(apiKey),
+      ),
+    );
+    if (response.status !== 200)
+      return makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: `Kimi Code plan usage returned HTTP ${response.status}.`,
+      });
+    const body = yield* HttpClientResponse.schemaBodyJson(KimiUsage)(response);
+    const windows: ServerProviderUsageWindow[] = [];
+    for (const [id, kind, label, duration] of [
+      ["limit_5h", "session", "Kimi Code plan · 5-hour", 300],
+      ["limit_month_total", "monthly", "Kimi Code plan · Monthly", undefined],
+    ] as const) {
+      const window = body.usages[id];
+      if (!window) continue;
+      const reset = window.reset_time ? Date.parse(window.reset_time) : NaN;
+      windows.push({
+        id,
+        kind,
+        label,
+        usedPercent: clampPercent(window.used_ratio * 100),
+        ...(duration === undefined ? {} : { windowDurationMins: duration }),
+        ...(Number.isFinite(reset) && reset > Date.parse(checkedAt)
+          ? { resetsAt: DateTime.formatIso(DateTime.makeUnsafe(reset)) }
+          : {}),
+      });
+    }
+    const crypto = yield* Crypto.Crypto;
+    const credentialFingerprint = yield* crypto
+      .digest("SHA-256", new TextEncoder().encode(`kimi-code\0${apiKey}`))
+      .pipe(Effect.map(Hex.encode), Effect.orDie);
+    return { ...makeUsageLimits({ checkedAt, windows }), credentialFingerprint };
+  }).pipe(
+    Effect.timeout("5 seconds"),
+    Effect.orElseSucceed(() =>
+      makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: "OpenCode could not read this instance's plan usage.",
+      }),
+    ),
+  );
+});
+
 /** External OpenCode servers own their credentials; never read the host's account for them. */
 export const readOpenCodeGoUsageLimits = Effect.fn("readOpenCodeGoUsageLimits")(function* (input: {
   readonly enabled: boolean;
