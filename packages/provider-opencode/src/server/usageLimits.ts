@@ -126,14 +126,14 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
     const layers = [yield* readFile(configPath)];
     if (env.OPENCODE_CONFIG) layers.push(yield* readFile(env.OPENCODE_CONFIG));
     layers.push(env.OPENCODE_CONFIG_CONTENT ?? "{}");
-    let config: typeof ProviderConfig.Type = {};
+    const config: typeof ProviderConfig.Type = {};
     for (const contents of layers) {
       const next = yield* decodeProviderConfig(contents);
       const providers = { ...config.provider };
       for (const [id, value] of Object.entries(next.provider ?? {})) {
         providers[id] = { options: { ...providers[id]?.options, ...value.options } };
       }
-      config = { ...config, ...next, provider: providers };
+      Object.assign(config, next, { provider: providers });
     }
     const provider =
       config.model?.split("/")[0] ??
