@@ -1,3 +1,5 @@
+import { accountLimitWindow } from "./usageAccountWindow";
+
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, type UsageProviderKind } from "@t3tools/contracts";
@@ -518,7 +520,7 @@ export function UsageLimitsSection({
                     return column?.window ? (
                       <PoolWindowCard
                         key={`${window.kind}:${window.id}`}
-                        pool={{ ...window, members: [column], columns: [column] }}
+                        pool={accountLimitWindow(window, account.key)}
                         color={colors[usageProviderKind(pool.driver) ?? "codex"]}
                         now={now}
                         environmentIds={
