@@ -53,9 +53,12 @@ export function exhaustedUsageWindow(
       });
     }
     case "opencode":
-      return exhausted.find(
-        (window) => !window.id.startsWith("go_") || model.startsWith("opencode-go/"),
-      );
+      return exhausted.find((window) => {
+        if (window.id.startsWith("go_")) return model.startsWith("opencode-go/");
+        if (window.id === "limit_5h" || window.id === "limit_month_total")
+          return model.startsWith("kimi-code/") || model.startsWith("kimi-code-plan-global/");
+        return true;
+      });
     default:
       return exhausted[0];
   }

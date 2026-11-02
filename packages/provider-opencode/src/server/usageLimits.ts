@@ -20,7 +20,7 @@ import {
 } from "@t3tools/provider-core/server/usageLimits";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-const AuthFile = Schema.Struct({ "opencode-go": Schema.optionalKey(Schema.Unknown) });
+const AuthFile = Schema.Record(Schema.String, Schema.Unknown);
 const ApiAuth = Schema.Struct({ type: Schema.Literal("api"), key: Schema.String });
 const decodeAuthFile = Schema.decodeEffect(Schema.fromJsonString(AuthFile));
 const decodeApiAuth = Schema.decodeUnknownOption(ApiAuth);
@@ -43,7 +43,7 @@ const UsageResponse = Schema.Struct({
 
 // Select before decoding so an OAuth or self-hosted connection cannot fall
 // through to another stored account. NULL-active rows predate the selection flag.
-const readStoredApiKey = (databasePath: string, integrationId: "opencode" | "opencode-go") =>
+const readStoredApiKey = (databasePath: string, integrationId: string) =>
   Effect.try(() => {
     const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
     try {
@@ -60,7 +60,10 @@ const readStoredApiKey = (databasePath: string, integrationId: "opencode" | "ope
           ? Option.getOrUndefined(decodeStoredKey(row.value))
           : undefined;
       const server = stored?.metadata?.server;
-      if (typeof server === "string") {
+      if (
+        (integrationId === "opencode" || integrationId === "opencode-go") &&
+        typeof server === "string"
+      ) {
         const url = new URL(server);
         if (`${url.origin}${url.pathname.replace(/\/+$/, "")}` !== "https://opencode.ai/console")
           return undefined;
@@ -107,22 +110,31 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const env = input.environment;
-    const configPath =
-      env.OPENCODE_CONFIG ||
-      path.join(
-        env.XDG_CONFIG_HOME || path.join(env.HOME || (yield* HostProcess.HomeDirectory), ".config"),
-        "opencode",
-        "opencode.json",
-      );
-    const contents =
-      env.OPENCODE_CONFIG_CONTENT ??
-      (yield* fs.readFileString(configPath).pipe(
+    const home = env.HOME || env.USERPROFILE || (yield* HostProcess.HomeDirectory);
+    const configPath = path.join(
+      env.XDG_CONFIG_HOME || path.join(home, ".config"),
+      "opencode",
+      "opencode.json",
+    );
+    const readFile = (file: string) =>
+      fs.readFileString(file).pipe(
         Effect.catchTags({
           PlatformError: (error) =>
             error.reason._tag === "NotFound" ? Effect.succeed("{}") : Effect.fail(error),
         }),
-      ));
-    const config = yield* decodeProviderConfig(contents);
+      );
+    const layers = [yield* readFile(configPath)];
+    if (env.OPENCODE_CONFIG) layers.push(yield* readFile(env.OPENCODE_CONFIG));
+    layers.push(env.OPENCODE_CONFIG_CONTENT ?? "{}");
+    let config: typeof ProviderConfig.Type = {};
+    for (const contents of layers) {
+      const next = yield* decodeProviderConfig(contents);
+      const providers = { ...config.provider };
+      for (const [id, value] of Object.entries(next.provider ?? {})) {
+        providers[id] = { options: { ...providers[id]?.options, ...value.options } };
+      }
+      config = { ...config, ...next, provider: providers };
+    }
     const provider =
       config.model?.split("/")[0] ??
       (config.enabled_providers?.length === 1 ? config.enabled_providers[0] : undefined);
@@ -130,13 +142,29 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
     if (provider !== "kimi-code" && provider !== "kimi-code-plan-global") return unsupported;
     const configuredKey = config.provider?.[provider]?.options?.apiKey;
     const reference = configuredKey?.match(/^\{env:([^}]+)\}$/);
-    const apiKey = (reference ? env[reference[1]!] : (configuredKey ?? env.KIMI_API_KEY))?.trim();
+    const dataHome = env.XDG_DATA_HOME || path.join(home, ".local", "share");
+    const auth = yield* decodeAuthFile(
+      env.OPENCODE_AUTH_CONTENT ?? (yield* readFile(path.join(dataHome, "opencode", "auth.json"))),
+    );
+    const apiAuth = decodeApiAuth(auth[provider]);
+    const databaseFile = env.OPENCODE_DB ?? "opencode.db";
+    const storedKey =
+      env.OPENCODE_AUTH_CONTENT || databaseFile === ":memory:"
+        ? undefined
+        : yield* readStoredApiKey(path.resolve(dataHome, "opencode", databaseFile), provider);
+    const apiKey = (
+      reference
+        ? env[reference[1]!]
+        : (configuredKey ??
+          storedKey ??
+          (Option.isSome(apiAuth) ? apiAuth.value.key : env.KIMI_API_KEY))
+    )?.trim();
     if (!apiKey)
       return makeUnavailableUsageLimits({
         checkedAt,
         reason: "probeFailed",
         message:
-          "Kimi Code plan key is unavailable in this instance's provider config or environment.",
+          "Kimi Code plan key is unavailable in this instance's provider config, credential store or environment.",
       });
     const client = yield* HttpClient.HttpClient;
     const response = yield* client.execute(
