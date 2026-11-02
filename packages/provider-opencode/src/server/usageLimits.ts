@@ -1,5 +1,7 @@
 import * as NodeSqlite from "node:sqlite";
 
+import { parse as parseJsonc, type ParseError } from "jsonc-parser";
+
 import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -86,7 +88,17 @@ const ProviderConfig = Schema.Struct({
     ),
   ),
 });
-const decodeProviderConfig = Schema.decodeEffect(Schema.fromJsonString(ProviderConfig));
+const decodeProviderConfigValue = Schema.decodeUnknownEffect(ProviderConfig);
+const decodeProviderConfigJson = Schema.decodeEffect(Schema.fromJsonString(ProviderConfig));
+// OpenCode config files are JSONC: comments and trailing commas are allowed.
+// Invalid JSONC goes through the strict decoder so it fails with its schema error.
+const decodeProviderConfig = (contents: string) => {
+  const errors: ParseError[] = [];
+  const value: unknown = parseJsonc(contents, errors, { allowTrailingComma: true });
+  return errors.length > 0
+    ? decodeProviderConfigJson(contents)
+    : decodeProviderConfigValue(value ?? {});
+};
 const KimiWindow = Schema.Struct({
   used_ratio: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
   reset_time: Schema.optional(Schema.NullOr(Schema.String)),
@@ -111,11 +123,7 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
     const path = yield* Path.Path;
     const env = input.environment;
     const home = env.HOME || env.USERPROFILE || (yield* HostProcess.HomeDirectory);
-    const configPath = path.join(
-      env.XDG_CONFIG_HOME || path.join(home, ".config"),
-      "opencode",
-      "opencode.json",
-    );
+    const configDir = path.join(env.XDG_CONFIG_HOME || path.join(home, ".config"), "opencode");
     const readFile = (file: string) =>
       fs.readFileString(file).pipe(
         Effect.catchTags({
@@ -123,7 +131,11 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
             error.reason._tag === "NotFound" ? Effect.succeed("{}") : Effect.fail(error),
         }),
       );
-    const layers = [yield* readFile(configPath)];
+    // Same global file order as OpenCode: later files override earlier ones.
+    const layers: string[] = [];
+    for (const name of ["config.json", "opencode.json", "opencode.jsonc"]) {
+      layers.push(yield* readFile(path.join(configDir, name)));
+    }
     if (env.OPENCODE_CONFIG) layers.push(yield* readFile(env.OPENCODE_CONFIG));
     layers.push(env.OPENCODE_CONFIG_CONTENT ?? "{}");
     const config: typeof ProviderConfig.Type = {};
@@ -138,7 +150,10 @@ export const readOpenCodeUsageLimits = Effect.fn("readOpenCodeUsageLimits")(func
     const provider =
       config.model?.split("/")[0] ??
       (config.enabled_providers?.length === 1 ? config.enabled_providers[0] : undefined);
-    if (provider === "opencode-go") return yield* readOpenCodeGoUsageLimits(input);
+    // No model configured: keep the previous behaviour and read the Go plan.
+    if (provider === undefined || provider === "opencode-go") {
+      return yield* readOpenCodeGoUsageLimits(input);
+    }
     if (provider !== "kimi-code" && provider !== "kimi-code-plan-global") return unsupported;
     const configuredKey = config.provider?.[provider]?.options?.apiKey;
     const reference = configuredKey?.match(/^\{env:([^}]+)\}$/);
