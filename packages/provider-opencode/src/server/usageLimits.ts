@@ -1,6 +1,7 @@
 import * as NodeSqlite from "node:sqlite";
 
-import { parse as parseJsonc, type ParseError } from "jsonc-parser";
+// The ESM build: the UMD entry loads ./impl/* with runtime requires the server bundle cannot follow.
+import { parse as parseJsonc, type ParseError } from "jsonc-parser/lib/esm/main.js";
 
 import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
