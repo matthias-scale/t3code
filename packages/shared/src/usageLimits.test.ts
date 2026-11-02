@@ -132,6 +132,10 @@ describe("new thread model fallback", () => {
     ["antigravity", ["gemini-weekly"], "antigravity-default", true],
     ["opencode", ["go_weekly"], "opencode/big-pickle", false],
     ["opencode", ["go_weekly"], "opencode-go/big-pickle", true],
+    ["opencode", ["limit_5h"], "anthropic/claude", false],
+    ["opencode", ["limit_month_total"], "opencode-go/big-pickle", false],
+    ["opencode", ["limit_5h"], "kimi-code/k3", true],
+    ["opencode", ["limit_month_total"], "kimi-code-plan-global/k3", true],
   ] as const)("matches %s pools %s to %s", (driver, ids, model, usesFallback) => {
     const defaultSelection = { ...selection, model };
     expect(
